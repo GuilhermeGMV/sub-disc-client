@@ -1,0 +1,7 @@
+# O libwebrtc pré-compilado para Windows usa o runtime C estático (/MT); o Rust
+# precisa linkar igual. De quebra o .exe não depende do VC++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

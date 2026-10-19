@@ -645,7 +645,11 @@ fn merge(list: &mut Vec<ChatMessage>, incoming: Vec<ChatMessage>) {
 fn format_time(timestamp: i64) -> String {
     fn local(t: i64) -> libc::tm {
         let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-        unsafe { libc::localtime_r(&(t as libc::time_t), &mut tm) };
+        let t = t as libc::time_t;
+        #[cfg(windows)]
+        unsafe { libc::localtime_s(&mut tm, &t) };
+        #[cfg(not(windows))]
+        unsafe { libc::localtime_r(&t, &mut tm) };
         tm
     }
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);

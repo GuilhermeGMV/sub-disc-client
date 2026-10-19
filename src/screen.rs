@@ -1,6 +1,6 @@
 //! Compartilhamento de tela com o capturador do próprio libwebrtc. No Wayland ele
-//! abre o seletor do portal (xdg-desktop-portal + PipeWire); no X11 captura a
-//! primeira tela.
+//! abre o seletor do portal (xdg-desktop-portal + PipeWire); no X11 e no Windows
+//! captura a tela principal.
 use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
 use livekit::prelude::*;
 use livekit::webrtc::desktop_capturer::{
@@ -90,19 +90,23 @@ fn capture_loop(source: NativeVideoSource, stop: Arc<AtomicBool>, done: Arc<Atom
             let _ = tx.send(result);
         }
     };
-    let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let mut options = DesktopCapturerOptions::new(if wayland {
-        DesktopCaptureSourceType::Generic
-    } else {
-        DesktopCaptureSourceType::Screen
-    });
+    // Só o Wayland escolhe a fonte no seletor do sistema; nos demais, a lista do capturador.
+    #[cfg(target_os = "linux")]
+    let picker = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    #[cfg(not(target_os = "linux"))]
+    let picker = false;
+    #[cfg(target_os = "linux")]
+    let source_type = if picker { DesktopCaptureSourceType::Generic } else { DesktopCaptureSourceType::Screen };
+    #[cfg(not(target_os = "linux"))]
+    let source_type = DesktopCaptureSourceType::Screen;
+    let mut options = DesktopCapturerOptions::new(source_type);
     options.set_include_cursor(true);
     let Some(mut capturer) = DesktopCapturer::new(options) else {
         done.store(true, Ordering::Relaxed);
         signal(&ready, Err("Captura de tela indisponível neste sistema.".into()));
         return;
     };
-    let selected = if wayland { None } else { capturer.get_source_list().into_iter().next() };
+    let selected = if picker { None } else { capturer.get_source_list().into_iter().next() };
     let callback = {
         let (ready, done) = (ready.clone(), done.clone());
         let started = Instant::now();
