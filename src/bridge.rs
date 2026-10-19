@@ -11,22 +11,50 @@ pub enum LoginMode {
 
 pub enum Command {
     /// Testa o servidor e informa se ele ainda precisa do primeiro administrador.
-    Probe { server: String },
-    Login { server: String, username: String, password: String, mode: LoginMode },
+    Probe {
+        server: String,
+    },
+    Login {
+        server: String,
+        username: String,
+        password: String,
+        mode: LoginMode,
+    },
     Logout,
-    LoadMessages { channel: String, before: Option<i64> },
-    SendMessage { channel: String, content: String },
-    JoinVoice { channel: String },
+    LoadMessages {
+        channel: String,
+        before: Option<i64>,
+    },
+    SendMessage {
+        channel: String,
+        content: String,
+    },
+    JoinVoice {
+        channel: String,
+    },
     LeaveVoice,
     SetMuted(bool),
     SetDeafened(bool),
-    MuteParticipant { identity: String, muted: bool },
-    StartScreen,
+    SetVolume {
+        user: String,
+        kind: crate::audio::AudioKind,
+        volume: crate::audio::Volume,
+    },
+    ListSources {
+        request: u64,
+    },
+    StartScreen(crate::capture::ShareRequest),
     StopScreen,
     ListDevices,
     SelectMic(String),
     SelectSpeaker(String),
-    SetProcessing { echo: bool, agc: bool, noise: bool },
+    SetProcessing {
+        echo: bool,
+        agc: bool,
+        noise: bool,
+    },
+    DemoState(VoiceStatus),
+    DemoError,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -43,7 +71,8 @@ pub struct ParticipantView {
     pub local: bool,
     pub speaking: bool,
     pub muted: bool,
-    pub locally_muted: bool,
+    pub volume: crate::audio::ParticipantVolume,
+    pub screen_audio: bool,
 }
 
 #[derive(Clone)]
@@ -52,6 +81,7 @@ pub struct TileView {
     pub key: String,
     pub name: String,
     pub screen: bool,
+    pub user: String,
 }
 
 #[derive(Clone)]
@@ -61,6 +91,9 @@ pub struct VoiceView {
     pub muted: bool,
     pub deafened: bool,
     pub screen: bool,
+    pub screen_pending: bool,
+    pub share_video: bool,
+    pub share_audio: bool,
     pub participants: Vec<ParticipantView>,
     pub tiles: Vec<TileView>,
 }
@@ -72,17 +105,37 @@ pub struct Device {
 }
 
 pub enum Event {
-    Probed { needs_setup: bool },
-    LoggedIn { user: User },
+    Sources {
+        request: u64,
+        result: Result<Vec<crate::capture::CaptureSourceInfo>, String>,
+    },
+    Probed {
+        needs_setup: bool,
+    },
+    LoggedIn {
+        user: User,
+    },
     /// Sessão salva inválida ou login recusado; volta à tela de entrada.
-    LoggedOut { error: Option<String> },
+    LoggedOut {
+        error: Option<String>,
+    },
     Connection(bool),
     Snapshot(Snapshot),
-    Presence { online: Vec<String>, voice: Vec<crate::model::VoicePresence> },
+    Presence {
+        online: Vec<String>,
+        voice: Vec<crate::model::VoicePresence>,
+    },
     Message(ChatMessage),
-    Messages { channel: String, messages: Vec<ChatMessage>, older: bool },
+    Messages {
+        channel: String,
+        messages: Vec<ChatMessage>,
+        older: bool,
+    },
     Voice(Option<VoiceView>),
-    Devices { mics: Vec<Device>, speakers: Vec<Device> },
+    Devices {
+        mics: Vec<Device>,
+        speakers: Vec<Device>,
+    },
     Error(String),
 }
 

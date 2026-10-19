@@ -43,18 +43,6 @@ pub fn normalize_origin(input: &str) -> Result<String, String> {
     Ok(url.origin().ascii_serialization())
 }
 
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn normalizes_origin() {
-        let n = |s| super::normalize_origin(s);
-        assert_eq!(n("chat.exemplo.com").unwrap(), "https://chat.exemplo.com");
-        assert_eq!(n("https://chat.exemplo.com/").unwrap(), "https://chat.exemplo.com");
-        assert_eq!(n(" http://localhost:8080/app ").unwrap(), "http://localhost:8080");
-        assert!(n("ftp://x").is_err());
-    }
-}
-
 impl Api {
     pub fn new(origin: String, session: Option<String>) -> Self {
         let http = reqwest::Client::builder()
@@ -63,7 +51,11 @@ impl Api {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("cliente HTTP");
-        Self { http, origin, session: Arc::new(RwLock::new(session)) }
+        Self {
+            http,
+            origin,
+            session: Arc::new(RwLock::new(session)),
+        }
     }
 
     pub fn origin(&self) -> &str {
@@ -120,7 +112,10 @@ impl Api {
                     StatusCode::TOO_MANY_REQUESTS => "Muitas tentativas; aguarde".into(),
                     _ => format!("Erro do servidor ({status})"),
                 });
-            return Err(ApiError { status: Some(status), message });
+            return Err(ApiError {
+                status: Some(status),
+                message,
+            });
         }
         serde_json::from_str(&text).map_err(|_| ApiError {
             status: Some(status),
@@ -149,7 +144,9 @@ impl Api {
     }
 
     pub async fn logout(&self) -> ApiResult<()> {
-        let _: Value = self.request(Method::POST, "/logout", Some(json!({}))).await?;
+        let _: Value = self
+            .request(Method::POST, "/logout", Some(json!({})))
+            .await?;
         *self.session.write().unwrap() = None;
         Ok(())
     }
@@ -162,22 +159,65 @@ impl Api {
         self.request(Method::GET, "/state", None).await
     }
 
-    pub async fn messages(&self, channel: &str, before: Option<i64>) -> ApiResult<Vec<ChatMessage>> {
+    pub async fn messages(
+        &self,
+        channel: &str,
+        before: Option<i64>,
+    ) -> ApiResult<Vec<ChatMessage>> {
         let query = before.map(|b| format!("?before={b}")).unwrap_or_default();
-        self.request(Method::GET, &format!("/channels/{channel}/messages{query}"), None).await
+        self.request(
+            Method::GET,
+            &format!("/channels/{channel}/messages{query}"),
+            None,
+        )
+        .await
     }
 
     pub async fn send_message(&self, channel: &str, content: &str) -> ApiResult<ChatMessage> {
         let body = json!({ "content": content });
-        self.request(Method::POST, &format!("/channels/{channel}/messages"), Some(body)).await
+        self.request(
+            Method::POST,
+            &format!("/channels/{channel}/messages"),
+            Some(body),
+        )
+        .await
     }
 
     pub async fn join(&self, channel: &str) -> ApiResult<JoinResponse> {
-        self.request(Method::POST, &format!("/channels/{channel}/join"), Some(json!({}))).await
+        self.request(
+            Method::POST,
+            &format!("/channels/{channel}/join"),
+            Some(json!({})),
+        )
+        .await
     }
 
     pub async fn leave(&self, lease: &str) -> ApiResult<()> {
-        let _: Value = self.request(Method::POST, "/media/leave", Some(json!({ "lease": lease }))).await?;
+        let _: Value = self
+            .request(
+                Method::POST,
+                "/media/leave",
+                Some(json!({ "lease": lease })),
+            )
+            .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn normalizes_origin() {
+        let n = |s| super::normalize_origin(s);
+        assert_eq!(n("chat.exemplo.com").unwrap(), "https://chat.exemplo.com");
+        assert_eq!(
+            n("https://chat.exemplo.com/").unwrap(),
+            "https://chat.exemplo.com"
+        );
+        assert_eq!(
+            n(" http://localhost:8080/app ").unwrap(),
+            "http://localhost:8080"
+        );
+        assert!(n("ftp://x").is_err());
     }
 }

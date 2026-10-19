@@ -16,7 +16,7 @@ if ((Get-Location).Path.Length -gt 40) {
     Write-Warning 'Caminho do projeto longo: se o build falhar com "path too long", mova-o para algo como C:\src\subdisc-client ou habilite caminhos longos no Windows.'
 }
 
-cargo build --release
+cargo build --release --locked
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force dist | Out-Null
 Copy-Item target\release\subdisc-client.exe dist\subdisc-client.exe -Force

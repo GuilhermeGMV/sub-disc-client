@@ -10,6 +10,9 @@ pub struct Config {
     pub username: String,
     /// Valor do cookie `subdisc_session`; dá acesso à conta, nunca é registrado em log.
     pub session: Option<String>,
+    /// Origem normalizada do servidor → ID estável de usuário → ganhos locais.
+    #[serde(default)]
+    pub volumes: std::collections::HashMap<String, crate::audio::Volumes>,
 }
 
 fn path() -> Option<PathBuf> {
@@ -47,5 +50,45 @@ impl Config {
         if let Err(e) = result {
             log::warn!("não foi possível salvar a configuração: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::{AudioKind, Volume};
+
+    #[test]
+    fn legacy_configuration_and_server_isolation() {
+        let mut config: Config =
+            serde_json::from_str(r#"{"server":"https://a","username":"ana","session":"example"}"#)
+                .unwrap();
+        assert!(config.volumes.is_empty());
+        config
+            .volumes
+            .entry("https://a".into())
+            .or_default()
+            .entry("u".into())
+            .or_default()
+            .set(
+                AudioKind::ScreenShare,
+                Volume {
+                    gain: 0.35,
+                    muted: true,
+                },
+            );
+        config
+            .volumes
+            .entry("https://b".into())
+            .or_default()
+            .entry("u".into())
+            .or_default();
+        let restored: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.username, "ana");
+        assert_eq!(restored.session.as_deref(), Some("example"));
+        assert_eq!(restored.volumes["https://a"]["u"].screen_share.gain, 0.35);
+        assert!(restored.volumes["https://a"]["u"].screen_share.muted);
+        assert_eq!(restored.volumes["https://b"]["u"].screen_share.gain, 1.0);
     }
 }

@@ -80,6 +80,17 @@ pub struct JoinResponse {
     pub lease: String,
 }
 
+#[derive(Serialize)]
+pub struct MediaEvent<'a> {
+    pub v: u32,
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub lease: &'a str,
+    pub muted: bool,
+    pub camera: bool,
+    pub screen: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,7 +99,9 @@ mod tests {
     fn parses_documented_events() {
         let message = r#"{"v":1,"type":"message","message":{"id":42,"channel_id":"c","user_id":"u","username":"ana","content":"oi","created_at":1792360000}}"#;
         let env: Envelope = serde_json::from_str(message).unwrap();
-        assert!(matches!(env.event, ServerEvent::Message { message } if message.id == 42 && message.content == "oi"));
+        assert!(
+            matches!(env.event, ServerEvent::Message { message } if message.id == 42 && message.content == "oi")
+        );
         for raw in [
             r#"{"v":1,"type":"presence","online":["u"],"voice":[]}"#,
             r#"{"v":1,"type":"channels_changed"}"#,
@@ -102,21 +115,17 @@ mod tests {
 
     #[test]
     fn media_event_matches_contract() {
-        let event = MediaEvent { v: 1, kind: "media", lease: "l", muted: true, camera: false, screen: false };
+        let event = MediaEvent {
+            v: 1,
+            kind: "media",
+            lease: "l",
+            muted: true,
+            camera: false,
+            screen: false,
+        };
         assert_eq!(
             serde_json::to_string(&event).unwrap(),
             r#"{"v":1,"type":"media","lease":"l","muted":true,"camera":false,"screen":false}"#
         );
     }
-}
-
-#[derive(Serialize)]
-pub struct MediaEvent<'a> {
-    pub v: u32,
-    #[serde(rename = "type")]
-    pub kind: &'static str,
-    pub lease: &'a str,
-    pub muted: bool,
-    pub camera: bool,
-    pub screen: bool,
 }

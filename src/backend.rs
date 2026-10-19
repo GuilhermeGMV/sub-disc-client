@@ -1,6 +1,7 @@
 //! Laço assíncrono que executa os comandos da interface: sessão, WebSocket de
 //! eventos, histórico de mensagens e a chamada de voz.
 use crate::api::{Api, normalize_origin};
+use crate::audio::{Volumes, user_of};
 use crate::bridge::{Command, Device, Event, Frames, LoginMode, UiSink};
 use crate::config::Config;
 use crate::model::ServerEvent;
@@ -8,7 +9,7 @@ use crate::voice::{self, VoiceCmd, VoiceHandle, VoiceSetup};
 use crate::ws::{self, PresenceOut, WsEvent};
 use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use reqwest::StatusCode;
-use std::collections::HashSet;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 struct Backend {
@@ -22,7 +23,7 @@ struct Backend {
     voice: Option<VoiceHandle>,
     audio: Option<PlatformAudio>,
     deafened: bool,
-    locally_muted: HashSet<String>,
+    volume_dirty: Option<Instant>,
 }
 
 pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, frames: Frames) {
@@ -38,17 +39,27 @@ pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, fra
         voice: None,
         audio: None,
         deafened: false,
-        locally_muted: HashSet::new(),
+        volume_dirty: None,
     };
     backend.resume().await;
+    let mut save_tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
+            _ = save_tick.tick() => {
+                if backend.volume_dirty.is_some_and(|at| at.elapsed() >= Duration::from_millis(750)) {
+                    backend.config.save();
+                    backend.volume_dirty = None;
+                }
+            }
             cmd = commands.recv() => match cmd {
                 Some(cmd) => backend.command(cmd).await,
                 None => break,
             },
             Some(event) = ws_rx.recv() => backend.ws_event(event).await,
         }
+    }
+    if backend.volume_dirty.is_some() {
+        backend.config.save();
     }
     backend.leave_voice().await;
 }
@@ -68,7 +79,9 @@ impl Backend {
                     self.config.session = None;
                     self.config.save();
                 }
-                self.ui.send(Event::LoggedOut { error: Some(e.message) });
+                self.ui.send(Event::LoggedOut {
+                    error: Some(e.message),
+                });
             }
         }
     }
@@ -78,7 +91,11 @@ impl Backend {
         self.config.username = user.username.clone();
         self.config.session = api.session();
         self.config.save();
-        self.ws = Some(ws::spawn(api.clone(), self.presence.clone(), self.ws_tx.clone()));
+        self.ws = Some(ws::spawn(
+            api.clone(),
+            self.presence.clone(),
+            self.ws_tx.clone(),
+        ));
         self.api = Some(api);
         self.ui.send(Event::LoggedIn { user });
     }
@@ -103,7 +120,12 @@ impl Backend {
                 },
                 Err(e) => self.ui.error(e),
             },
-            Command::Login { server, username, password, mode } => {
+            Command::Login {
+                server,
+                username,
+                password,
+                mode,
+            } => {
                 let origin = match normalize_origin(&server) {
                     Ok(o) => o,
                     Err(e) => return self.ui.send(Event::LoggedOut { error: Some(e) }),
@@ -111,13 +133,21 @@ impl Backend {
                 let api = Api::new(origin, None);
                 let result = match &mode {
                     LoginMode::Login => api.login(&username, &password).await,
-                    LoginMode::Register { invite } => api.register(&username, &password, invite.trim()).await,
-                    LoginMode::Setup { setup_key } => api.setup(&username, &password, setup_key.trim()).await,
+                    LoginMode::Register { invite } => {
+                        api.register(&username, &password, invite.trim()).await
+                    }
+                    LoginMode::Setup { setup_key } => {
+                        api.setup(&username, &password, setup_key.trim()).await
+                    }
                 };
                 match result {
                     Ok(user) if api.session().is_some() => self.start_session(api, user),
-                    Ok(_) => self.ui.send(Event::LoggedOut { error: Some("O servidor não abriu a sessão.".into()) }),
-                    Err(e) => self.ui.send(Event::LoggedOut { error: Some(e.message) }),
+                    Ok(_) => self.ui.send(Event::LoggedOut {
+                        error: Some("O servidor não abriu a sessão.".into()),
+                    }),
+                    Err(e) => self.ui.send(Event::LoggedOut {
+                        error: Some(e.message),
+                    }),
                 }
             }
             Command::Logout => {
@@ -131,7 +161,11 @@ impl Backend {
                 let ui = self.ui.clone();
                 tokio::spawn(async move {
                     match api.messages(&channel, before).await {
-                        Ok(messages) => ui.send(Event::Messages { channel, messages, older: before.is_some() }),
+                        Ok(messages) => ui.send(Event::Messages {
+                            channel,
+                            messages,
+                            older: before.is_some(),
+                        }),
                         Err(e) => ui.error(e.message),
                     }
                 });
@@ -153,16 +187,29 @@ impl Backend {
                 self.deafened = deafened;
                 self.voice_cmd(VoiceCmd::SetDeafened(deafened));
             }
-            Command::MuteParticipant { identity, muted } => {
-                let user = identity.split(':').next().unwrap_or(&identity).to_owned();
-                if muted {
-                    self.locally_muted.insert(user);
-                } else {
-                    self.locally_muted.remove(&user);
-                }
-                self.voice_cmd(VoiceCmd::MuteParticipant { identity, muted });
+            Command::SetVolume { user, kind, volume } => {
+                let user = user_of(&user).to_owned();
+                self.config
+                    .volumes
+                    .entry(self.config.server.clone())
+                    .or_default()
+                    .entry(user.clone())
+                    .or_default()
+                    .set(kind, volume);
+                self.volume_dirty = Some(Instant::now());
+                self.voice_cmd(VoiceCmd::SetVolume { user, kind, volume });
             }
-            Command::StartScreen => self.voice_cmd(VoiceCmd::StartScreen),
+            Command::ListSources { request } => {
+                let ui = self.ui.clone();
+                tokio::spawn(async move {
+                    let result = tokio::task::spawn_blocking(crate::capture::enumerate)
+                        .await
+                        .unwrap_or_else(|_| Err("Falha ao listar as fontes de captura.".into()));
+                    ui.send(Event::Sources { request, result });
+                });
+            }
+            Command::StartScreen(request) => self.voice_cmd(VoiceCmd::StartScreen(request)),
+            Command::DemoState(_) | Command::DemoError => {}
             Command::StopScreen => self.voice_cmd(VoiceCmd::StopScreen),
             Command::ListDevices => {
                 self.platform_audio();
@@ -170,7 +217,11 @@ impl Backend {
             Command::SelectMic(id) => {
                 if let Some(audio) = self.platform_audio() {
                     let id = RecordingDeviceId::from_unchecked_guid(&id);
-                    let result = if self.voice.is_some() { audio.switch_recording_device(&id) } else { audio.set_recording_device(&id) };
+                    let result = if self.voice.is_some() {
+                        audio.switch_recording_device(&id)
+                    } else {
+                        audio.set_recording_device(&id)
+                    };
                     if result.is_err() {
                         self.ui.error("Não foi possível trocar o microfone.");
                     }
@@ -179,9 +230,15 @@ impl Backend {
             Command::SelectSpeaker(id) => {
                 if let Some(audio) = self.platform_audio() {
                     let id = PlayoutDeviceId::from_unchecked_guid(&id);
-                    let result = if self.voice.is_some() { audio.switch_playout_device(&id) } else { audio.set_playout_device(&id) };
+                    let result = if self.voice.is_some() {
+                        audio.switch_playout_device(&id)
+                    } else {
+                        audio.set_playout_device(&id)
+                    };
                     if result.is_err() {
                         self.ui.error("Não foi possível trocar a saída de áudio.");
+                    } else {
+                        self.voice_cmd(VoiceCmd::ReapplyAudio);
                     }
                 }
             }
@@ -191,7 +248,8 @@ impl Backend {
                         && audio.set_auto_gain_control(agc, false).is_ok()
                         && audio.set_noise_suppression(noise, false).is_ok();
                     if !ok {
-                        self.ui.error("Não foi possível aplicar o processamento de áudio.");
+                        self.ui
+                            .error("Não foi possível aplicar o processamento de áudio.");
                     }
                 }
             }
@@ -203,9 +261,18 @@ impl Backend {
         if self.audio.is_none() {
             match PlatformAudio::new() {
                 Ok(audio) => {
-                    let device = |id: &str, name: &str| Device { id: id.to_owned(), name: name.to_owned() };
-                    let mics = audio.recording_devices().map(|d| device(d.id.as_str(), &d.name)).collect();
-                    let speakers = audio.playout_devices().map(|d| device(d.id.as_str(), &d.name)).collect();
+                    let device = |id: &str, name: &str| Device {
+                        id: id.to_owned(),
+                        name: name.to_owned(),
+                    };
+                    let mics = audio
+                        .recording_devices()
+                        .map(|d| device(d.id.as_str(), &d.name))
+                        .collect();
+                    let speakers = audio
+                        .playout_devices()
+                        .map(|d| device(d.id.as_str(), &d.name))
+                        .collect();
                     self.ui.send(Event::Devices { mics, speakers });
                     self.audio = Some(audio);
                 }
@@ -220,7 +287,9 @@ impl Backend {
 
     async fn join_voice(&mut self, channel: String) {
         self.leave_voice().await;
-        let (Some(api), Some(audio)) = (self.api.clone(), self.platform_audio()) else { return };
+        let (Some(api), Some(audio)) = (self.api.clone(), self.platform_audio()) else {
+            return;
+        };
         self.voice = Some(voice::spawn(VoiceSetup {
             api,
             channel,
@@ -229,7 +298,12 @@ impl Backend {
             frames: self.frames.clone(),
             presence: self.presence.clone(),
             deafened: self.deafened,
-            locally_muted: self.locally_muted.clone(),
+            volumes: self
+                .config
+                .volumes
+                .get(&self.config.server)
+                .cloned()
+                .unwrap_or_else(Volumes::new),
         }));
     }
 
@@ -253,11 +327,16 @@ impl Backend {
     async fn ws_event(&mut self, event: WsEvent) {
         match event {
             WsEvent::Connected(connected) => self.ui.send(Event::Connection(connected)),
-            WsEvent::Unauthorized => self.end_session(Some("Sessão expirada. Entre novamente.".into())).await,
+            WsEvent::Unauthorized => {
+                self.end_session(Some("Sessão expirada. Entre novamente.".into()))
+                    .await
+            }
             WsEvent::Server(event) => match event {
                 ServerEvent::Snapshot { data } => self.ui.send(Event::Snapshot(data)),
                 ServerEvent::Message { message } => self.ui.send(Event::Message(message)),
-                ServerEvent::Presence { online, voice } => self.ui.send(Event::Presence { online, voice }),
+                ServerEvent::Presence { online, voice } => {
+                    self.ui.send(Event::Presence { online, voice })
+                }
                 ServerEvent::ChannelsChanged | ServerEvent::UsersChanged => {
                     let Some(api) = self.api.clone() else { return };
                     match api.state().await {
@@ -269,7 +348,8 @@ impl Backend {
                 ServerEvent::VoiceReset => {
                     if self.voice.is_some() {
                         self.leave_voice().await;
-                        self.ui.error("A chamada foi reiniciada pelo servidor. Entre novamente.");
+                        self.ui
+                            .error("A chamada foi reiniciada pelo servidor. Entre novamente.");
                     }
                 }
             },

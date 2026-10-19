@@ -34,7 +34,11 @@ impl PresenceOut {
     }
 }
 
-pub fn spawn(api: Api, presence: PresenceOut, events: mpsc::UnboundedSender<WsEvent>) -> tokio::task::JoinHandle<()> {
+pub fn spawn(
+    api: Api,
+    presence: PresenceOut,
+    events: mpsc::UnboundedSender<WsEvent>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut attempt = 0u32;
         loop {
@@ -58,11 +62,20 @@ pub fn spawn(api: Api, presence: PresenceOut, events: mpsc::UnboundedSender<WsEv
 struct Stop;
 
 /// Uma conexão completa; `Ok(true)` se chegou a conectar antes de cair.
-async fn session(api: &Api, presence: &PresenceOut, events: &mpsc::UnboundedSender<WsEvent>) -> Result<bool, Stop> {
+async fn session(
+    api: &Api,
+    presence: &PresenceOut,
+    events: &mpsc::UnboundedSender<WsEvent>,
+) -> Result<bool, Stop> {
     let url = format!("{}/api/ws", api.origin().replacen("http", "ws", 1));
-    let Ok(mut request) = url.into_client_request() else { return Err(Stop) };
+    let Ok(mut request) = url.into_client_request() else {
+        return Err(Stop);
+    };
     let headers = request.headers_mut();
-    headers.insert(http::header::ORIGIN, api.origin().parse().map_err(|_| Stop)?);
+    headers.insert(
+        http::header::ORIGIN,
+        api.origin().parse().map_err(|_| Stop)?,
+    );
     if let Some(cookie) = api.cookie_header().and_then(|c| c.parse().ok()) {
         headers.insert(http::header::COOKIE, cookie);
     }
