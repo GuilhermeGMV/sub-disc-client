@@ -94,7 +94,14 @@ function Invoke-Native {
         if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
             try { $process.Kill() } catch { }
             $null = $process.WaitForExit(10000)
-            throw "Timed out after ${TimeoutSeconds}s: $FilePath $($start.Arguments)"
+            # The pipes close with the process: show what it printed before hanging.
+            $partial = ''
+            foreach ($task in $stderr, $stdout) {
+                if ($task.Wait(5000)) { $partial += $task.Result }
+            }
+            $partial = $partial.Trim()
+            if ($partial.Length -gt 4000) { $partial = $partial.Substring($partial.Length - 4000) }
+            throw "Timed out after ${TimeoutSeconds}s: $FilePath $($start.Arguments)`nOutput before the timeout: $(if ($partial) { $partial } else { '(none)' })"
         }
         $process.WaitForExit()
         $result = [pscustomobject]@{ ExitCode = $process.ExitCode; Output = $stdout.Result; Error = $stderr.Result }
