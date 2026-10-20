@@ -15,7 +15,7 @@ if ($PSVersionTable.PSEdition -ne 'Core') {
     Remove-TypeData -TypeName System.Array -ErrorAction SilentlyContinue
 }
 
-$script:ArtifactNames = @('Subdisc-portable', 'Subdisc-Windows-x64-portable.zip', 'portable-validation.json')
+$script:ArtifactNames = @('Subdisc-portable', 'Subdisc-Windows-x64-portable.zip', 'portable-validation.json', 'portable-test-logs')
 
 function Assert-WindowsX64 {
     if ($env:OS -ne 'Windows_NT' -or -not [Environment]::Is64BitProcess) {
@@ -170,8 +170,9 @@ function Invoke-Isolated {
         if ($null -eq $entry.Value) { $block.Remove($entry.Key) } else { $block[$entry.Key] = [string]$entry.Value }
     }
     $argumentString = ConvertTo-ArgumentString $Arguments
+    $processId = 0
     try {
-        $code = [SubdiscProcess]::Run($FilePath, $argumentString, $WorkingDirectory, $block, $LogPath, $TimeoutSeconds * 1000)
+        $code = [SubdiscProcess]::Run($FilePath, $argumentString, $WorkingDirectory, $block, $LogPath, $TimeoutSeconds * 1000, [ref]$processId)
     } catch {
         $inner = $_.Exception
         while ($inner.InnerException) { $inner = $inner.InnerException }
@@ -187,11 +188,11 @@ function Invoke-Isolated {
             Write-Warning "Native runner could not start $FilePath ($($inner.Message)); using pipes instead."
             $result = Invoke-Native $FilePath $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment -TimeoutSeconds $TimeoutSeconds -IgnoreExitCode
             Write-Utf8 $LogPath (($result.Error + "`n" + $result.Output).Trim())
-            return [pscustomobject]@{ ExitCode = $result.ExitCode; Output = (($result.Error + "`n" + $result.Output).Trim()) }
+            return [pscustomobject]@{ ExitCode = $result.ExitCode; Output = (($result.Error + "`n" + $result.Output).Trim()); ProcessId = 0 }
         }
         throw
     }
-    return [pscustomobject]@{ ExitCode = $code; Output = (Read-SharedText $LogPath) }
+    return [pscustomobject]@{ ExitCode = $code; Output = (Read-SharedText $LogPath); ProcessId = $processId }
 }
 
 function Test-SystemDll([string]$Name) {
@@ -362,8 +363,10 @@ function Get-GStreamerVersion([string]$Root) {
     return $version
 }
 
-function Remove-PortableArtifacts([string]$Dist) {
+# -KeepDiagnostics: after a failure, keep portable-test-logs for inspection.
+function Remove-PortableArtifacts([string]$Dist, [switch]$KeepDiagnostics) {
     foreach ($name in $script:ArtifactNames) {
+        if ($KeepDiagnostics -and $name -eq 'portable-test-logs') { continue }
         $path = Join-Path $Dist $name
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Recurse -Force }
     }

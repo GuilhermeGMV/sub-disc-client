@@ -155,12 +155,13 @@ try {
 
     # Headless tests are mandatory; GUI tests are explicit (-Gui) because build
     # machines may have no interactive desktop.
-    & (Join-Path $PSScriptRoot 'test-portable-windows.ps1') -BundlePath $bundle -ReportPath (Join-Path $stage 'validation.json') -GStreamerRoot $GStreamerRoot
+    $testLogs = Join-Path $dist 'portable-test-logs'
+    & (Join-Path $PSScriptRoot 'test-portable-windows.ps1') -BundlePath $bundle -ReportPath (Join-Path $stage 'validation.json') -GStreamerRoot $GStreamerRoot -DiagnosticsPath (Join-Path $testLogs 'staging')
     New-PortableZip $bundle $zipTemp
     # Validate the extracted archive, not only the staging tree.
-    $extracted = Join-Path $stage 'zip extracted'
+    $extracted = Join-Path $stage 'zip-extracted'
     Expand-PortableZip $zipTemp $extracted
-    & (Join-Path $PSScriptRoot 'test-portable-windows.ps1') -BundlePath (Join-Path $extracted 'Subdisc-portable') -ReportPath (Join-Path $stage 'zip-validation.json') -GStreamerRoot $GStreamerRoot
+    & (Join-Path $PSScriptRoot 'test-portable-windows.ps1') -BundlePath (Join-Path $extracted 'Subdisc-portable') -ReportPath (Join-Path $stage 'zip-validation.json') -GStreamerRoot $GStreamerRoot -DiagnosticsPath (Join-Path $testLogs 'zip')
     $final = Join-Path $dist 'Subdisc-portable'
     $zip = Join-Path $dist 'Subdisc-Windows-x64-portable.zip'
     Move-Item -LiteralPath $bundle -Destination $final
@@ -173,8 +174,10 @@ try {
     Write-Host "Executable: $final\subdisc-client.exe"
 } catch {
     $message = $_.Exception.Message
-    Remove-PortableArtifacts $dist
-    Write-Utf8 $failureReport ([ordered]@{ok=$false; utc=[DateTime]::UtcNow.ToString('o'); error=$message} | ConvertTo-Json -Depth 4)
+    Remove-PortableArtifacts $dist -KeepDiagnostics
+    $logs = Join-Path $dist 'portable-test-logs'
+    Write-Utf8 $failureReport ([ordered]@{ok=$false; utc=[DateTime]::UtcNow.ToString('o'); error=$message
+        test_logs=$(if (Test-Path -LiteralPath $logs) { 'dist/portable-test-logs' } else { $null })} | ConvertTo-Json -Depth 4)
     throw
 } finally {
     if (Test-Path -LiteralPath $stage) { Remove-Item -LiteralPath $stage -Recurse -Force }

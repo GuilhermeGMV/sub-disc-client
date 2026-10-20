@@ -149,12 +149,14 @@ jobs:
             dist/Subdisc-Windows-x64-portable.zip
             dist/portable-validation.json
           if-no-files-found: error
-      - name: Failure report
+      - name: Failure report and test logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: portable-failure
-          path: dist/portable-failure.json
+          path: |
+            dist/portable-failure.json
+            dist/portable-test-logs
           if-no-files-found: ignore
       - name: Rust tests against the installed SDK (development mode)
         shell: powershell

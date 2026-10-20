@@ -137,10 +137,13 @@ public static class SubdiscProcess {
     const int StartfUseStdHandles = 0x00000100;
     const uint HandleFlagInherit = 0x00000001, WaitObject0 = 0, Infinite = 0xFFFFFFFF;
 
-    // Returns the exit code. Throws Win32Exception if the process cannot be
+    // Returns the exit code (and the process id, e.g. to tell its log files from
+    // those of its children). Throws Win32Exception if the process cannot be
     // started and TimeoutException (after ending the process tree) on timeout.
     public static int Run(string fileName, string arguments, string workingDirectory,
-                          System.Collections.IDictionary environment, string logPath, int timeoutMilliseconds) {
+                          System.Collections.IDictionary environment, string logPath, int timeoutMilliseconds,
+                          out int processId) {
+        processId = 0;
         var names = new List<string>();
         foreach (System.Collections.DictionaryEntry entry in environment) {
             string name = (string)entry.Key;
@@ -175,6 +178,7 @@ public static class SubdiscProcess {
                 Marshal.FreeHGlobal(environmentBlock);
             }
         }
+        processId = info.dwProcessId;
         try {
             job = CreateJobObjectW(IntPtr.Zero, null);
             bool inJob = job != IntPtr.Zero && AssignProcessToJobObject(job, info.hProcess);

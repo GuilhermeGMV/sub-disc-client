@@ -39,6 +39,14 @@ unificado, que reporta a versão `1.28.8.1`/“GIT”) e no GitHub Actions
 | ZIP com nome acentuado no 5.1 | .NET Framework só marca UTF-8 com `[Text.Encoding]::UTF8` | Idem, e leitura explícita em UTF-8 |
 | Variável “removida” ficava vazia no PowerShell 7.5+ | `$null` vira `''`; desde o .NET 9, `''` cria variável vazia | `[NullString]::Value` |
 | “913 present, 2 inventoried” | `ConvertFrom-Json` do 5.1 não enumera arrays JSON | `Read-JsonArray` |
+| Scanner do pacote não usado (Windows e CI) | Bug do GStreamer: caminho do EXE via `GetModuleFileNameA`; com acentos (“ü”, “ç”) o comando do scanner não é montado e o escaneamento ocorre no processo | Manifesto `activeCodePage` UTF-8 embutido pelo `build.rs`; teste exige o manifesto e prova o uso do scanner pelo log do próprio processo do scanner |
+
+Essa última causa foi reproduzida com os binários oficiais 1.26.10 sob Wine,
+num layout idêntico ao do pacote: caminho ASCII → scanner usado; caminho
+“Subdisc test ü 中 ç” → “Couldn't build cmd string” e fallback; mesmo caminho
+com o manifesto UTF-8 → scanner usado, 12 linhas de plugins carregados no log
+dele. O Wine também confirmou que os níveis LOG estão compilados nos binários
+oficiais.
 
 ## Verificações adicionais sem Windows (ensaio com o SDK real)
 

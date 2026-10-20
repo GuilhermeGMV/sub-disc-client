@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- Embedded into subdisc-client.exe by build.rs (MSVC /MANIFESTINPUT).
+     activeCodePage UTF-8 (Windows 10 1903+): the process's ANSI ("A") APIs use
+     UTF-8. GStreamer builds the gst-plugin-scanner command line from
+     GetModuleFileNameA; with a legacy code page, a non-ASCII install path (e.g. a
+     localized Desktop folder with accents) is not valid UTF-8 and GStreamer silently scans plugins
+     in-process instead of using the bundled scanner. -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

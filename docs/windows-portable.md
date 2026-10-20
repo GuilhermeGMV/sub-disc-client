@@ -93,7 +93,18 @@ escanear no próprio processo. O scanner fica na raiz, ao lado das DLLs: o
 diretório de aplicação dele é a raiz do pacote, então seus imports e os dos
 plugins que ele carrega se resolvem ali. O upstream também prefixa ao PATH do
 scanner o diretório da `gstreamer-1.0-0.dll` (a raiz). `GST_PLUGIN_SCANNER_1_0`
-aponta explicitamente para essa cópia. O validador PE trata todo PE do pacote
+aponta explicitamente para essa cópia.
+
+O GStreamer monta a linha de comando do scanner com o caminho do executável
+obtido por `GetModuleFileNameA` (code page ANSI) e a converte como se fosse
+UTF-8. Com acentos no caminho de instalação (por exemplo, uma Área de Trabalho
+em português), a conversão falha (“Couldn't build cmd string”) e o GStreamer
+escaneia os plugins dentro do processo, sem avisar. Por isso o `build.rs` embute
+no `subdisc-client.exe` o manifesto `scripts/windows/subdisc-client.manifest`
+com `activeCodePage` UTF-8 (Windows 10 1903+ e 11): as APIs ANSI do processo
+passam a usar UTF-8 e o scanner funciona em qualquer caminho. Em Windows 10
+anterior a 1903 o manifesto é ignorado: o cliente funciona, mas, com caminho
+não ASCII, sem o isolamento do scanner. O teste do pacote exige o manifesto. O validador PE trata todo PE do pacote
 (cliente, scanner, plugins, módulos) com a regra “todo import não-inbox precisa
 estar na raiz”, que é o diretório de aplicação dos dois processos.
 
@@ -177,9 +188,12 @@ do chamador ficam intactos. Verifica:
    registro/arquivos de desenvolvimento, plugins = especificação, versão do CRT.
 2. Todo EXE/DLL é AMD64; imports normais e atrasados resolvidos transitivamente.
 3. `gst-plugin-scanner.exe` executado sozinho com PATH do Windows (exit 1 esperado).
-4. `--portable-check` com registro novo: o log de debug do GStreamer (um
-   arquivo por processo) precisa mostrar o scanner **do pacote** sendo usado e
-   nenhum fallback para escaneamento no processo.
+4. `--portable-check` com registro novo, primeiro no próprio caminho do pacote
+   e depois numa cópia com espaços e Unicode: o log de debug do GStreamer (um
+   arquivo por processo) do **processo do scanner** precisa mostrar os plugins
+   do pacote carregados, e o do cliente nenhum fallback para escaneamento no
+   próprio processo. Em falha, a mensagem traz as linhas relevantes e os logs
+   ficam em `dist/portable-test-logs` (artifact `portable-failure` no CI).
 5. O check carrega cada plugin (origem `lib/gstreamer-1.0`, versão do core,
    licença revisada), instancia cada elemento, codifica/decodifica Opus+RTP e
    VP8+RTP, processa `webrtcdsp` e `audiomixer`+`webrtcechoprobe`, carrega os

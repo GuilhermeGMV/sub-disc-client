@@ -11,6 +11,9 @@ param(
     # Optional global SDK used as hostile PATH/plugin path: proves it is never used.
     [string]$GStreamerRoot = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64,
     [int]$TimeoutSeconds = 120,
+    # Logs and reports of the child processes are copied here when a check fails
+    # (default: portable-test-logs next to the report).
+    [string]$DiagnosticsPath = '',
     [switch]$Gui
 )
 $ErrorActionPreference = 'Stop'
@@ -18,6 +21,7 @@ $ErrorActionPreference = 'Stop'
 Assert-WindowsX64
 $BundlePath = (Resolve-Path -LiteralPath $BundlePath).Path
 $ReportPath = [IO.Path]::GetFullPath($ReportPath)
+if (-not $DiagnosticsPath) { $DiagnosticsPath = Join-Path (Split-Path -Parent $ReportPath) 'portable-test-logs' }
 if ($GStreamerRoot -and -not (Test-Path -LiteralPath (Join-Path $GStreamerRoot 'bin\gstreamer-1.0-0.dll'))) { $GStreamerRoot = $null }
 $unicode = [string][char]0x00FC + ' ' + [char]0x4E2D + ' ' + [char]0x00E7
 $work = Join-Path ([IO.Path]::GetTempPath()) ("Subdisc test $unicode " + [guid]::NewGuid().ToString('N').Substring(0, 8))
@@ -40,6 +44,10 @@ function Assert-Inventory([string]$Root) {
         'vcruntime140.dll','share/openssl/openssl.cnf','README.txt','etc/ssl/certs/ca-certificates.crt') {
         Assert-File (Join-Path $Root $file)
     }
+    # The client must embed the UTF-8 code page manifest (build.rs): without it
+    # GStreamer cannot start the scanner from a non-ASCII install path.
+    $exeText = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes((Join-Path $Root 'subdisc-client.exe')))
+    if ($exeText -notmatch 'activeCodePage[^>]*>\s*UTF-8\s*<') { throw 'subdisc-client.exe lacks the embedded UTF-8 activeCodePage manifest (build.rs / scripts/windows/subdisc-client.manifest).' }
     $inventory = Read-JsonArray (Join-Path $Root 'files.json')
     $actual = @(Get-ChildItem -LiteralPath $Root -Recurse -File)
     if ($actual.Count -ne $inventory.Count + 1) { throw "Unexpected/missing files in the bundle: $($actual.Count) present, $($inventory.Count + 1) inventoried (a shipped registry or a write into the application folder?)." }
@@ -106,6 +114,7 @@ function Get-ChildEnvironment([switch]$Hostile) {
 function Invoke-CheckRaw([string]$Root, [string]$Name, [hashtable]$Environment, [string[]]$Extra = @()) {
     $output = Join-Path $work "$Name.json"
     $result = Invoke-Isolated (Join-Path $Root 'subdisc-client.exe') (@('--portable-check', $output) + $Extra) -WorkingDirectory $work -LogPath (Join-Path $work "$Name.log") -Environment $Environment -TimeoutSeconds $TimeoutSeconds
+    $script:lastClientId = $result.ProcessId
     $report = if (Test-Path -LiteralPath $output) { Read-Json $output } else { $null }
     return @($result.ExitCode, $report)
 }
@@ -137,6 +146,58 @@ function Assert-CheckFails([string]$Root, [string]$Name, [hashtable]$Environment
     }
     $results[$Name] = [ordered]@{ exit_code = $code; error = $report.error }
 }
+# Fresh-registry check with GStreamer debug logs, one file per process (%p):
+# the client's own file and one per gst-plugin-scanner process it started.
+function Invoke-ScanCheck([string]$Root, [string]$Name) {
+    $logs = Join-Path $work "gst-$Name"
+    $null = New-Item -ItemType Directory -Force -Path $logs
+    $environment = Get-ChildEnvironment
+    $environment['GST_DEBUG'] = 'GST_PLUGIN_LOADING:6,GST_REGISTRY:4'
+    $environment['GST_DEBUG_FILE'] = Join-Path $logs 'gst-%p.log'
+    $environment['GST_DEBUG_NO_COLOR'] = '1'
+    $report = Invoke-Check $Root $Name $environment
+    $results["$Name-scanner"] = Assert-ScannerUsed $Root $Name $logs $script:lastClientId
+    return $report
+}
+# GStreamer silently falls back to scanning plugins inside the client when the
+# helper cannot be started or fails. Proof that it did not: another process (the
+# scanner) logged loading the bundle's plugins, and the client logged no fallback.
+# Only INFO/WARNING messages are relied upon; the LOG-level spawn line is checked
+# when present.
+function Assert-ScannerUsed([string]$Root, [string]$Name, [string]$Logs, [int]$ClientId) {
+    $files = @(Get-ChildItem -LiteralPath $Logs -File -Filter 'gst-*.log')
+    # Without a process id (pipe fallback runner) the client's log is the one
+    # that read the registry cache; the scanner never does.
+    $clientName = if ($ClientId) { "gst-$ClientId.log" } else {
+        @($files | Where-Object { (Read-SharedText $_.FullName) -match 'reading registry cache' } | ForEach-Object Name)[0]
+    }
+    if (-not $clientName) { throw "Cannot tell the client's GStreamer log from the scanner's in $Logs" }
+    $pluginDir = [IO.Path]::GetFullPath((Join-Path $Root 'lib\gstreamer-1.0')).TrimEnd('\') + '\'
+    $helperLoads = 0
+    foreach ($file in $files | Where-Object Name -ne $clientName) {
+        foreach ($match in [regex]::Matches((Read-SharedText $file.FullName), 'plugin "([^"]+)" loaded')) {
+            $path = $match.Groups[1].Value
+            try { $path = [IO.Path]::GetFullPath($path) } catch { }
+            if ($path.StartsWith($pluginDir, [StringComparison]::OrdinalIgnoreCase)) { $helperLoads++ }
+        }
+    }
+    $client = ((@($files | Where-Object Name -eq $clientName | ForEach-Object { Read-SharedText $_.FullName }) + @(Read-SharedText (Join-Path $work "$Name.log"))) -join "`n")
+    $fallback = @([regex]::Matches($client, '(?m)^.*(Failed starting plugin scanner|External plugin loader failed|Scanning in-process|Couldn.t create helper process|Unexpected child process exit state|Child process is not terminated|No gst-plugin-scanner available|Spawning gst-plugin-scanner helper failed).*$') | ForEach-Object { $_.Value.Trim() })
+    $expected = [IO.Path]::GetFullPath((Join-Path $Root 'gst-plugin-scanner.exe'))
+    $spawned = @([regex]::Matches($client, 'Trying to spawn gst-plugin-scanner helper at (.+?), command') | ForEach-Object { $_.Groups[1].Value })
+    $foreign = @($spawned | Where-Object { -not [string]::Equals([IO.Path]::GetFullPath($_), $expected, [StringComparison]::OrdinalIgnoreCase) })
+    if ($helperLoads -eq 0 -or $fallback.Count -or $foreign.Count) {
+        $listing = ($files | ForEach-Object { "$($_.Name) ($($_.Length) bytes)" }) -join ', '
+        $relevant = @(foreach ($file in $files) {
+            foreach ($line in (Read-SharedText $file.FullName) -split "`n") {
+                if ($line -match 'scanner|helper|plugin.loader|in-process|pipe|child process|Could not') { "$($file.Name): $($line.Trim())" }
+            }
+        }) + @((Read-SharedText (Join-Path $work "$Name.log")) -split "`n" | Where-Object { $_.Trim() } | ForEach-Object { "stderr: $($_.Trim())" })
+        if ($relevant.Count -gt 30) { $relevant = $relevant[0..29] }
+        throw ("The bundled gst-plugin-scanner.exe did not scan the plugins for '{0}' ({1}): {2} plugin loads in other processes, fallback: [{3}], foreign helper: [{4}]. Client pid {5}; logs: {6}`n{7}" -f $Name, $Root, $helperLoads, ($fallback -join ' | '), ($foreign -join ' | '), $ClientId, $listing, ($relevant -join "`n"))
+    }
+    return [ordered]@{ plugin_loads_in_scanner = $helperLoads; spawn_logged = [bool]$spawned.Count }
+}
 function New-TestCopy([string]$Name) {
     $copy = Join-Path $work $Name
     Copy-Item -LiteralPath $BundlePath -Destination $copy -Recurse
@@ -160,28 +221,12 @@ try {
     if ($scanner.ExitCode -ne 1) { throw ("gst-plugin-scanner.exe exited with {0} (0x{0:X8}) instead of 1: {1}" -f $scanner.ExitCode, $scanner.Output) }
     $checks.Add('scanner: gst-plugin-scanner.exe starts from the bundle with a Windows-only PATH (exit 1, imports resolved)')
 
+    # The bundled scanner must do the plugin scan: from the bundle as given,
+    # then from a copy whose path has spaces and Unicode characters.
+    $null = Invoke-ScanCheck $BundlePath 'scanner-direct'
     $first = New-TestCopy 'first location'
-    $environment = Get-ChildEnvironment
-    $logs = Join-Path $work 'gst-logs'
-    $null = New-Item -ItemType Directory -Path $logs
-    $environment['GST_DEBUG'] = 'GST_PLUGIN_LOADING:6,GST_REGISTRY:4'
-    # %p: one file per process; the scanner child inherits these variables.
-    $environment['GST_DEBUG_FILE'] = Join-Path $logs 'gst-%p.log'
-    $environment['GST_DEBUG_NO_COLOR'] = '1'
-    $fresh = Invoke-Check $first 'fresh' $environment
-    # GStreamer silently falls back to in-process scanning when the helper fails;
-    # the debug log proves the bundled scanner process did the scan.
-    # GST debug files (one per process) plus the client's stderr: the
-    # "External plugin loader failed" fallback is a g_warning, not a GST log.
-    $log = ((Get-ChildItem -LiteralPath $logs -File | ForEach-Object { Read-SharedText $_.FullName }) + (Read-SharedText (Join-Path $work 'fresh.log'))) -join "`n"
-    $spawned = [regex]::Matches($log, 'Trying to spawn gst-plugin-scanner helper at (.+?), command') | ForEach-Object { $_.Groups[1].Value }
-    if (-not $spawned -or @($spawned | Where-Object { -not $_.EndsWith('\first location\gst-plugin-scanner.exe', [StringComparison]::OrdinalIgnoreCase) }).Count) {
-        throw "The bundled gst-plugin-scanner.exe was not the helper used for the fresh registry: $($spawned -join '; ')"
-    }
-    if ($log -match 'Failed starting plugin scanner|External plugin loader failed|Scanning in-process|Couldn.t create helper process|Unexpected child process exit state') {
-        throw 'gst-plugin-scanner failed; GStreamer fell back to in-process scanning.'
-    }
-    $checks.Add('fresh registry under the private LOCALAPPDATA built by the bundled scanner process (debug log), no in-process fallback')
+    $fresh = Invoke-ScanCheck $first 'fresh'
+    $checks.Add('fresh registries under the private LOCALAPPDATA built by the bundled gst-plugin-scanner process (its own debug log shows the bundle plugins loaded), no in-process fallback, from the bundle path and from a path with spaces/Unicode')
     $cached = Invoke-Check $first 'cached' (Get-ChildEnvironment)
     if ($cached.registry -ne $fresh.registry) { throw 'Registry path was not stable between launches.' }
     $hostile = Invoke-Check $first 'hostile' (Get-ChildEnvironment -Hostile)
@@ -259,6 +304,14 @@ try {
     throw
 } finally {
     if ($denied) { $null = & "$env:SystemRoot\System32\icacls.exe" $denied /remove:d "*$sid" 2>&1 }
+    if (-not $success) {
+        # Keep what the child processes wrote: the work directory is deleted below.
+        try {
+            $null = New-Item -ItemType Directory -Force -Path $DiagnosticsPath
+            Get-ChildItem -LiteralPath $work -File | Where-Object { $_.Extension -in '.log','.json' } | Copy-Item -Destination $DiagnosticsPath -Force
+            Get-ChildItem -LiteralPath $work -Directory -Filter 'gst-*' | Copy-Item -Destination $DiagnosticsPath -Recurse -Force
+        } catch { Write-Warning "Could not keep the test logs: $($_.Exception.Message)" }
+    }
     $null = [SubdiscErrorMode]::SetErrorMode($previousErrorMode)
     $null = New-Item -ItemType Directory -Force -Path (Split-Path -Parent $ReportPath)
     $bundleManifest = Join-Path $BundlePath 'portable-runtime.json'
@@ -268,6 +321,7 @@ try {
         gstreamer = $(if (Test-Path -LiteralPath $bundleManifest) { (Read-Json $bundleManifest).gstreamer_version } else { $null })
         global_sdk_used_as_hostile_environment = $GStreamerRoot
         checks = @($checks.ToArray()); results = $results; error = $failure
+        diagnostics = $(if ($success) { $null } else { $DiagnosticsPath })
         gui = $(if ($Gui) { 'requested; see checks' } else { 'not run; use -Gui on an interactive desktop' })
         manual = 'NOT VERIFIED here: clean Windows 10/11 VM, Explorer double-click, real server calls between two users, physical microphone/speakers, acoustic AEC, window capture, reconnection'
     } | ConvertTo-Json -Depth 12)
