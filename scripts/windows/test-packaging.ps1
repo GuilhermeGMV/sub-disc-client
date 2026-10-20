@@ -84,10 +84,16 @@ try {
 
     # The caller's environment is restored exactly.
     $env:SUBDISC_KEEP = 'original'
+    $path = [Environment]::GetEnvironmentVariable('PATH', 'Process')
     $saved = Save-ProcessEnvironment
-    $env:SUBDISC_KEEP = 'changed'; $env:SUBDISC_NEW = 'x'; Remove-Item Env:PATH
+    $env:SUBDISC_KEEP = 'changed'; $env:SUBDISC_NEW = 'x'; [Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
     Restore-ProcessEnvironment $saved
-    Assert-True ($env:SUBDISC_KEEP -eq 'original' -and -not (Test-Path Env:SUBDISC_NEW) -and $env:PATH) 'Environment restore failed'
+    $keep = [Environment]::GetEnvironmentVariable('SUBDISC_KEEP', 'Process')
+    $added = [Environment]::GetEnvironmentVariable('SUBDISC_NEW', 'Process')
+    $restored = [Environment]::GetEnvironmentVariable('PATH', 'Process')
+    Assert-True ($keep -ceq 'original') "Environment restore: SUBDISC_KEEP is '$keep'"
+    Assert-True ($null -eq $added) "Environment restore: SUBDISC_NEW still set to '$added'"
+    Assert-True ($restored -ceq $path) ("Environment restore: PATH differs (before {0} chars, after {1})" -f "$path".Length, "$restored".Length)
     Remove-Item Env:SUBDISC_KEEP
 
     # ZIP: one top-level folder, '/' separators, byte-identical extraction, and

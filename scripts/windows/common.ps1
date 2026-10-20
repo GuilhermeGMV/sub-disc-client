@@ -35,15 +35,25 @@ function Get-RelativePath([string]$Root, [string]$Path) {
 # The caller's process environment is restored after build/package/test, also
 # when the scripts are dot-sourced or run with & from an existing session.
 function Save-ProcessEnvironment {
-    $saved = @{}
-    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) { $saved[$entry.Key] = $entry.Value }
-    return $saved
-}
-function Restore-ProcessEnvironment([hashtable]$Saved) {
-    foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
-        if (-not $Saved.ContainsKey($key)) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') }
+    # Case-insensitive like Windows itself. Names starting with '=' (per-drive
+    # current directories) cannot be set through .NET and are left alone.
+    $saved = New-Object 'Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        if (-not ([string]$entry.Key).StartsWith('=')) { $saved[[string]$entry.Key] = [string]$entry.Value }
     }
-    foreach ($entry in $Saved.GetEnumerator()) { [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process') }
+    return ,$saved
+}
+function Restore-ProcessEnvironment($Saved) {
+    foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
+        if (-not ([string]$key).StartsWith('=') -and -not $Saved.ContainsKey([string]$key)) {
+            [Environment]::SetEnvironmentVariable([string]$key, $null, 'Process')
+        }
+    }
+    foreach ($entry in $Saved.GetEnumerator()) {
+        if ([Environment]::GetEnvironmentVariable($entry.Key, 'Process') -cne $entry.Value) {
+            [Environment]::SetEnvironmentVariable($entry.Key, $entry.Value, 'Process')
+        }
+    }
 }
 
 # Windows command-line quoting (CommandLineToArgvW rules) for ProcessStartInfo.
