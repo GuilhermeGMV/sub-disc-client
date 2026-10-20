@@ -65,10 +65,17 @@ jobs:
           $null = New-Item -ItemType Directory -Force -Path $cache, $logs
           foreach ($entry in $files.GetEnumerator()) {
             $msi = Join-Path $cache $entry.Key
+            # A truncated/corrupted download (seen on the runner for the ~390 MB
+            # Development MSI) is discarded and fetched again.
             for ($attempt = 1; -not (Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value; $attempt++) {
-              if ($attempt -gt 3) { throw "Download/checksum failed 3 times: $base/$($entry.Key)" }
+              if (Test-Path $msi) {
+                Write-Warning ("{0}: {1} bytes, SHA-256 {2} (expected {3}); downloading again" -f $entry.Key, (Get-Item $msi).Length, (Get-FileHash $msi -Algorithm SHA256).Hash, $entry.Value)
+                Remove-Item $msi -Force
+              }
+              if ($attempt -gt 4) { throw "Download/checksum failed 4 times: $base/$($entry.Key)" }
               Write-Host "Downloading $($entry.Key) (attempt $attempt)"
-              try { Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi } catch { Write-Warning $_.Exception.Message; Start-Sleep 15 }
+              & "$env:SystemRoot\System32\curl.exe" --fail --location --silent --show-error --retry 5 --retry-delay 10 --retry-all-errors --output $msi "$base/$($entry.Key)"
+              if ($LASTEXITCODE) { Write-Warning "curl exit code $LASTEXITCODE"; Remove-Item $msi -Force -ErrorAction SilentlyContinue; Start-Sleep 15 }
             }
             $log = Join-Path $logs "$($entry.Key).log"
             for ($attempt = 1; ; $attempt++) {
