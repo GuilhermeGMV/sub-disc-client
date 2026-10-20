@@ -64,7 +64,12 @@ foreach ($entry in $Origins.GetEnumerator() | Sort-Object Key) {
     $inventory += [ordered]@{file=$entry.Key; notices="licenses/gstreamer/$component"; component=$component}
 }
 $version = (Select-String -LiteralPath (Join-Path $GStreamerRoot 'lib/pkgconfig/gstreamer-1.0.pc') -Pattern '^Version:\s*(\S+)').Matches.Groups[1].Value
-if ($version -notmatch '^1\.[0-9]+\.[0-9]+$') { throw 'Unrecognized GStreamer version; corresponding source references cannot be generated.' }
+if ($version -notmatch '^(1\.[0-9]+\.[0-9]+)(\.[0-9]+)?$') { throw 'Unrecognized GStreamer version; corresponding source references cannot be generated.' }
+$sdkVersion = $version
+# Upstream tags carry major.minor.micro only. A nano (development/prerelease)
+# SDK is not exactly the tagged release; the notice files record that.
+$version = $matches[1]
+$exactRelease = ($sdkVersion -eq $version -or $sdkVersion -eq "$version.0")
 $extraNotices = @()
 foreach ($component in $components | Sort-Object -Unique) {
     $directory = Join-Path $destination "gstreamer/$component"
@@ -96,7 +101,7 @@ foreach ($component in $components | Sort-Object -Unique) {
 }
 Write-Utf8 (Join-Path $destination 'upstream-notices.json') (ConvertTo-Json -InputObject $extraNotices -Depth 4)
 $sources = @($components | Sort-Object -Unique | ForEach-Object {
-    [ordered]@{component=$_; recipe="https://gitlab.freedesktop.org/gstreamer/cerbero/-/blob/$version/recipes/$_.recipe"}
+    [ordered]@{component=$_; recipe="https://gitlab.freedesktop.org/gstreamer/cerbero/-/blob/$version/recipes/$_.recipe"; sdk_version=$sdkVersion; exact_release=$exactRelease}
 })
 Write-Utf8 (Join-Path $destination 'native-components.json') (ConvertTo-Json -InputObject $inventory -Depth 5)
 Write-Utf8 (Join-Path $destination 'source-recipes.json') (ConvertTo-Json -InputObject $sources -Depth 5)

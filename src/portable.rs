@@ -226,8 +226,11 @@ pub fn check() -> Result<Value, String> {
     let portable = root();
     let specs: Value = serde_json::from_str(include_str!("../scripts/windows/runtime.json"))
         .map_err(|e| e.to_string())?;
-    let (major, minor, micro, _) = gst::version();
-    let core_version = format!("{major}.{minor}.{micro}");
+    // Same form as the SDK's package version: nano only for GIT/prerelease builds.
+    let core_version = match gst::version() {
+        (major, minor, micro, 0) => format!("{major}.{minor}.{micro}"),
+        (major, minor, micro, nano) => format!("{major}.{minor}.{micro}.{nano}"),
+    };
     if let Some(root) = portable {
         let manifest: Value =
             serde_json::from_slice(&std::fs::read(root.join(MANIFEST)).map_err(|e| e.to_string())?)
