@@ -77,11 +77,21 @@ foreach ($component in $components | Sort-Object -Unique) {
     # Recover its actual upstream texts, not an inferred license from another DLL.
     if (-not (Test-Path -LiteralPath $directory) -and $component -eq 'gst-plugins-good-1.0') {
         $null = New-Item -ItemType Directory -Force -Path $directory
+        # COPYING (the license text) is required; upstream dropped AUTHORS in 1.28.
         foreach ($name in 'COPYING','AUTHORS') {
             $url = "https://raw.githubusercontent.com/GStreamer/gstreamer/$version/subprojects/gst-plugins-good/$name"
             $out = Join-Path $directory $name
             [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-            Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $out
+            } catch {
+                $response = $_.Exception.Response
+                if ($name -eq 'AUTHORS' -and $response -and [int]$response.StatusCode -eq 404) {
+                    Remove-Item -LiteralPath $out -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+                throw "Cannot download upstream notice $url : $($_.Exception.Message)"
+            }
             if ((Get-Item -LiteralPath $out).Length -lt 100) { throw "Incomplete upstream notice: $url" }
             $extraNotices += [ordered]@{component=$component;url=$url;sha256=(Get-FileHash -LiteralPath $out -Algorithm SHA256).Hash}
         }
