@@ -42,7 +42,7 @@ dist/
     gst-plugin-scanner.exe
     *.dll                          # GStreamer, GLib, OpenSSL, libnice... e CRT MSVC
     lib/gstreamer-1.0/gst*.dll     # 24 plugins de scripts/windows/runtime.json
-    lib/gio/modules/*.dll          # quando fornecidos pelo runtime
+    lib/gio/modules/gioopenssl.dll # backend TLS do GIO, quando fornecido pelo runtime
     lib/ossl-modules/*.dll         # quando fornecidos pelo runtime
     share/openssl/openssl.cnf
     etc/ssl/certs/ca-certificates.crt
@@ -72,7 +72,7 @@ WASAPI2), D3D11/WGC e as fontes/sinks usadas por `--media-probe` e pelos testes.
 `playback`/`typefindfunctions` não são usados por nenhum pipeline e saíram do pacote.
 
 `package-windows.ps1` copia esses plugins, o scanner, os módulos carregados
-dinamicamente (GIO, OpenSSL) e o bundle de CAs, e percorre recursivamente as
+dinamicamente (backend TLS do GIO e módulos OpenSSL; os módulos de proxy do GIO/libproxy não são usados e ficam fora) e o bundle de CAs, e percorre recursivamente as
 tabelas PE32+ de imports normais e atrasados. Uma dependência só é resolvida no
 `bin` do SDK GStreamer ou no redistribuível MSVC — nunca em PATH ou System32. A
 lista de DLLs inbox do Windows é explícita; existir em System32 não basta. PE

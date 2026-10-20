@@ -65,11 +65,15 @@ try {
     }
     # Loaded with LoadLibrary at runtime, so PE imports alone cannot find them.
     # Keep their layout and scan their imports too; never copy SDK files.
-    foreach ($directory in 'lib/gio/modules','lib/ossl-modules') {
-        $source = Join-Path $GStreamerRoot $directory
+    # GIO: only the TLS backend (GTlsConnection, e.g. for libnice TURN over TLS).
+    # Proxy-resolver modules (giolibproxy -> libproxy -> pxbackend) are unused:
+    # HTTP/WebSocket are Rust code and libnice has its own proxy settings.
+    $modules = [ordered]@{ 'lib/gio/modules' = '^(lib)?gio(openssl|gnutls)\.dll$'; 'lib/ossl-modules' = '\.dll$' }
+    foreach ($module in $modules.GetEnumerator()) {
+        $source = Join-Path $GStreamerRoot $module.Key
         if (Test-Path -LiteralPath $source) {
-            foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File) {
-                Copy-RuntimeFile $file.FullName "$directory/$($file.Name)" 'gstreamer'
+            foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File | Where-Object Name -Match $module.Value) {
+                Copy-RuntimeFile $file.FullName "$($module.Key)/$($file.Name)" 'gstreamer'
             }
         }
     }
