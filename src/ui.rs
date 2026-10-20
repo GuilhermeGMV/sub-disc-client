@@ -978,6 +978,7 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        crate::portable::ui_smoke(ui.ctx());
         while let Ok(event) = self.events.try_recv() {
             self.handle(event);
         }

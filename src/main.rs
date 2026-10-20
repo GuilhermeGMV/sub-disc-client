@@ -11,6 +11,7 @@ mod demo;
 mod media_probe;
 mod model;
 mod platform_audio;
+mod portable;
 mod rtc;
 mod screen;
 mod ui;
@@ -23,6 +24,18 @@ mod x11_capture;
 use bridge::{Frames, UiSink};
 
 fn main() -> eframe::Result {
+    if let Err(error) = portable::configure() {
+        portable::fatal(&error);
+    }
+    if let Some(path) = portable::report_path("--portable-check") {
+        match portable::check() {
+            Ok(report) => match portable::write_report(&path, &report) {
+                Ok(()) => std::process::exit(0),
+                Err(error) => portable::fatal(&error),
+            },
+            Err(error) => portable::fatal(&error),
+        }
+    }
     let demo = std::env::args().any(|arg| arg == "--demo" || arg == "--dev-ui");
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,subdisc_client=info"),

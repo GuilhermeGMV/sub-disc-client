@@ -1,1 +1,3 @@
 # GStreamer uses the platform's shared runtime; no special C runtime override.
+# Windows portable builds ship the release MSVC CRT app-local. The build script
+# applies /DEPENDENTLOADFLAG only to that build; bare cargo retains the SDK PATH.

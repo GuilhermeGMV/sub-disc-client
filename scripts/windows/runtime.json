@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "plugins": [
+    {"name": "coreelements","elements": ["queue","identity","capsfilter","fakesink"],"component": "gstreamer-1.0","licenses": ["LGPL"]},
+    {"name": "app","elements": ["appsrc","appsink"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "audioconvert","elements": ["audioconvert"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "audioresample","elements": ["audioresample"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "audiomixer","elements": ["audiomixer"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "audiotestsrc","elements": ["audiotestsrc"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "videotestsrc","elements": ["videotestsrc"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "videoconvertscale","elements": ["videoconvert","videoscale"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "videorate","elements": ["videorate"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "volume","elements": ["volume"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "opus","elements": ["opusenc","opusdec"],"component": "gst-plugins-base-1.0","licenses": ["LGPL"]},
+    {"name": "autodetect","elements": ["autoaudiosrc","autoaudiosink"],"component": "gst-plugins-good-1.0","licenses": ["LGPL"]},
+    {"name": "vpx","elements": ["vp8enc","vp8dec"],"component": "gst-plugins-good-1.0","licenses": ["LGPL"]},
+    {"name": "rtp","elements": ["rtpopuspay","rtpopusdepay","rtpvp8pay","rtpvp8depay"],"component": "gst-plugins-good-1.0","licenses": ["LGPL"]},
+    {"name": "rtpmanager","elements": ["rtpbin","rtpjitterbuffer","rtprtxsend","rtprtxreceive"],"component": "gst-plugins-good-1.0","licenses": ["LGPL"]},
+    {"name": "nice","elements": ["nicesrc","nicesink"],"component": "libnice","licenses": ["LGPL"]},
+    {"name": "dtls","elements": ["dtlssrtpenc","dtlssrtpdec"],"component": "gst-plugins-bad-1.0","licenses": ["BSD"]},
+    {"name": "srtp","elements": ["srtpenc","srtpdec"],"component": "gst-plugins-bad-1.0","licenses": ["LGPL"]},
+    {"name": "sctp","elements": ["sctpenc","sctpdec"],"component": "gst-plugins-bad-1.0","licenses": ["BSD"]},
+    {"name": "webrtc","elements": ["webrtcbin"],"component": "gst-plugins-bad-1.0","licenses": ["LGPL"]},
+    {"name": "webrtcdsp","elements": ["webrtcdsp","webrtcechoprobe"],"component": "gst-plugins-bad-1.0","licenses": ["LGPL"]},
+    {"name": "wasapi","elements": ["wasapisrc","wasapisink"],"component": "gst-plugins-bad-1.0","windows": true,"licenses": ["LGPL"]},
+    {"name": "wasapi2","elements": ["wasapi2src","wasapi2sink"],"component": "gst-plugins-bad-1.0","windows": true,"licenses": ["LGPL"]},
+    {"name": "d3d11","elements": ["d3d11screencapturesrc","d3d11download"],"component": "gst-plugins-bad-1.0","windows": true,"licenses": ["LGPL"]}
+  ]
+}

@@ -95,7 +95,10 @@ impl Rtc {
                 let a = audio.ok_or("Áudio indisponível")?.settings();
                 if (a.echo || a.agc || a.noise) && gst::ElementFactory::find("webrtcdsp").is_none()
                 {
-                    return Err("Instale o plugin GStreamer webrtcdsp para processamento de voz (scripts/deps.sh).".into());
+                    return Err(format!(
+                        "Plugin GStreamer webrtcdsp ausente (processamento de voz). {}",
+                        crate::portable::repair_hint()
+                    ));
                 }
                 if gst::ElementFactory::find("webrtcdsp").is_some() {
                     format!(
@@ -558,8 +561,9 @@ fn init() -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!(
-                    "Plugins GStreamer ausentes: {}. Instale as dependências de mídia (README).",
-                    missing.join(", ")
+                    "Plugins GStreamer ausentes: {}. {}",
+                    missing.join(", "),
+                    crate::portable::repair_hint()
                 ))
             }
         })

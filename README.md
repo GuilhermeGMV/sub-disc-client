@@ -50,19 +50,54 @@ target/release/subdisc-client
 `scripts/cargo.sh` carrega esse ambiente automaticamente. Usa Cargo do sistema
 ou o toolchain local do servidor (`SUBDISC_TOOLS` pode substituir o caminho).
 
-## Windows
+## Windows — para usuários finais
 
-Instale Rust MSVC, Visual Studio Build Tools e os SDKs **runtime e development**
-GStreamer MSVC x86_64 completos. Configure `GSTREAMER_1_0_ROOT_MSVC_X86_64` e execute:
+1. Baixe o arquivo `Subdisc-Windows-x64-portable.zip`.
+2. Extraia o conteúdo para uma pasta.
+3. Execute `subdisc-client.exe`.
+4. Informe o endereço do servidor e entre na conta.
+
+## Windows — para desenvolvedores
+
+Use a branch `nolivekit`, Windows 10/11 x64, PowerShell x64 5.1 ou 7,
+Rust estável com target `x86_64-pc-windows-msvc` e Visual Studio Build Tools
+com a carga **Desenvolvimento para desktop com C++** e Windows SDK.
+Instale os pacotes **Runtime e Development completos**, da mesma versão, do
+[GStreamer MSVC x86_64](https://gstreamer.freedesktop.org/download/), >= 1.22.
+No instalador unificado, escolha runtime e desenvolvimento. Não use MinGW/x86.
+
+A variável `GSTREAMER_1_0_ROOT_MSVC_X86_64` indica a raiz do SDK na máquina de
+build. O script também procura os diretórios padrão oficiais. Exemplo:
 
 ```powershell
+$env:GSTREAMER_1_0_ROOT_MSVC_X86_64 = 'C:\gstreamer\1.0\msvc_x86_64'
 powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
 ```
 
-O destino também precisa das DLLs/plugins GStreamer e do runtime MSVC apropriado;
-o executável deixou de ser autocontido. Captura usa Windows Graphics Capture.
-Build e execução Windows ainda precisam ser validados nessa plataforma. Veja a
-[instalação oficial](https://gstreamer.freedesktop.org/documentation/installing/on-windows.html).
+Esse único comando compila release, coleta DLLs/plugins/CRT/licenças, testa o
+pacote e a extração do ZIP e gera:
+
+- `dist/Subdisc-Windows-x64-portable.zip`
+- `dist/Subdisc-portable/subdisc-client.exe`
+- `dist/portable-validation.json`
+
+O tamanho da pasta e do ZIP é exibido ao final. Não se exigem Python ou Node.
+Há acesso à rede para crates e avisos de licença ausentes dos pacotes upstream.
+Para reempacotar sem recompilar e para executar os testes gráficos:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\package-windows.ps1
+powershell -ExecutionPolicy Bypass -File scripts\test-portable-windows.ps1 -BundlePath dist\Subdisc-portable -Gui
+powershell -ExecutionPolicy Bypass -File scripts\windows\test-packaging.ps1
+```
+
+O demo portátil permanece offline: `subdisc-client.exe --demo` ou `--dev-ui`.
+Builds de desenvolvimento fora do layout portátil continuam usando o SDK global.
+O build exige testes headless; `-Gui` acrescenta a demo em uma sessão interativa.
+Antes de distribuir uma release, valide duplo clique em Windows limpo e chamadas
+com dispositivos/servidor reais conforme a [matriz de testes](docs/windows-portable.md).
+Consulte também [licenças e fontes correspondentes](docs/windows-licenses.md)
+e a [evidência de validação disponível](docs/windows-validation.md).
 
 ## Servidor e rede
 

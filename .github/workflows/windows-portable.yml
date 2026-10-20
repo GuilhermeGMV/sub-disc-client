@@ -1,0 +1,72 @@
+name: Windows portable (nolivekit)
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Require nolivekit
+        shell: powershell
+        run: |
+          if ('${{ github.ref }}' -ne 'refs/heads/nolivekit') { throw 'Run this workflow on nolivekit.' }
+      - name: Install pinned official GStreamer Runtime and Development
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = 'https://gstreamer.freedesktop.org/data/pkg/windows/1.26.10/msvc'
+          $files = [ordered]@{
+            'gstreamer-1.0-msvc-x86_64-1.26.10.msi' = 'a863bf3faa49e9f33bd3cc42967b473482d4dc98655ed95cba1ac59f26fb0cfb'
+            'gstreamer-1.0-devel-msvc-x86_64-1.26.10.msi' = '8487a115fea3b0b0b4c55a9a413ad1adab0fe78f6681feedc60858a48613a121'
+          }
+          foreach ($entry in $files.GetEnumerator()) {
+            $msi = Join-Path $env:RUNNER_TEMP $entry.Key
+            Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi
+            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) { throw 'GStreamer checksum mismatch' }
+            $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart INSTALLDIR=C:\gstreamer ADDLOCAL=ALL" -PassThru -Wait
+            if ($p.ExitCode -notin 0,3010) { throw "MSI failed: $($p.ExitCode)" }
+          }
+          'GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64' >> $env:GITHUB_ENV
+      - name: Rust MSVC
+        shell: powershell
+        run: |
+          rustup update stable
+          if ($LASTEXITCODE) { throw 'rustup failed' }
+          rustup default stable
+          rustup target add x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw 'rustup target failed' }
+      - name: Packaging regression tests (Windows PowerShell 5.1 and PowerShell 7)
+        shell: powershell
+        run: |
+          ./scripts/windows/test-packaging.ps1
+          pwsh -NoProfile -File ./scripts/windows/test-packaging.ps1
+          if ($LASTEXITCODE) { throw "pwsh tests failed: $LASTEXITCODE" }
+      - name: Build, package and validate extracted ZIP
+        shell: powershell
+        run: ./scripts/build-windows.ps1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Subdisc-Windows-x64-portable
+          path: |
+            dist/Subdisc-Windows-x64-portable.zip
+            dist/portable-validation.json
+          if-no-files-found: error
+      - name: Failure report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: portable-failure
+          path: dist/portable-failure.json
+          if-no-files-found: ignore
+      - name: Rust tests against the installed SDK (development mode)
+        shell: powershell
+        run: |
+          $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          $env:PATH = "$root\bin;$env:PATH"
+          $env:PKG_CONFIG = "$root\bin\pkg-config.exe"
+          $env:PKG_CONFIG_PATH = "$root\lib\pkgconfig"
+          cargo test --locked --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw "cargo test failed: $LASTEXITCODE" }
