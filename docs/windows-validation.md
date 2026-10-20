@@ -51,7 +51,7 @@ nativo gerar o novo manifesto. Demo e dev-ui foram testadas em Xvfb naquela sess
 - `test-portable-windows.ps1`: scanner isolado, uso do scanner comprovado pelo
   log, ambiente hostil com o SDK global, pasta movida/Unicode/somente leitura,
   auditoria de módulos, os quatro testes negativos e `-Gui` (WGC, demo, dev-ui).
-- Workflow manual `Windows portable (nolivekit)` em `windows-2022`.
+- Workflow `Windows portable (nolivekit)` em `windows-2022` (push na `nolivekit` e tags `v*`); validado apenas com `actionlint`.
 - Matriz manual de [windows-portable.md](windows-portable.md): duplo clique em
   Windows 10 e 11 limpos, chamadas reais entre dois usuários, microfone,
   alto-falantes, AEC acústico, troca/hotplug de dispositivos, captura de

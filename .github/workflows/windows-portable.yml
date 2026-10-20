@@ -1,43 +1,98 @@
 name: Windows portable (nolivekit)
+# Every push to nolivekit builds, packages and validates the portable ZIP and
+# keeps it as a run artifact. Pushing a v* tag (on a nolivekit commit) also
+# publishes the ZIP as a GitHub Release. The manual button only appears once
+# this file exists on the default branch.
 on:
+  push:
+    branches: [nolivekit]
+    tags: ['v*']
+    # Documentation-only commits do not change the package. Path filters are
+    # not applied to tag pushes. windows-licenses.md ships as licenses/NOTICE.md.
+    paths:
+      - '**'
+      - '!**.md'
+      - 'docs/windows-licenses.md'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  # A newer push to the same branch supersedes a running build.
+  group: windows-portable-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+env:
+  GSTREAMER_VERSION: 1.26.10
 jobs:
   package:
     runs-on: windows-2022
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tags need history to prove they point into nolivekit.
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/') && '0' || '1' }}
       - name: Require nolivekit
         shell: powershell
         run: |
-          if ('${{ github.ref }}' -ne 'refs/heads/nolivekit') { throw 'Run this workflow on nolivekit.' }
+          $ref = '${{ github.ref }}'
+          if ($ref -eq 'refs/heads/nolivekit') { exit 0 }
+          if ($ref -notlike 'refs/tags/v*') { throw "Run this workflow on nolivekit or a v* tag, not $ref." }
+          git fetch --no-tags origin nolivekit
+          if ($LASTEXITCODE) { throw 'Cannot fetch nolivekit.' }
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+          if ($LASTEXITCODE) { throw "Tag $ref does not point to a commit of nolivekit." }
+      - name: Cache GStreamer installers
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/gstreamer-msi
+          key: gstreamer-msvc-x86_64-${{ env.GSTREAMER_VERSION }}
       - name: Install pinned official GStreamer Runtime and Development
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $base = 'https://gstreamer.freedesktop.org/data/pkg/windows/1.26.10/msvc'
+          $version = $env:GSTREAMER_VERSION
+          $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc"
+          # SHA-256 of the official installers of GSTREAMER_VERSION; update both together.
           $files = [ordered]@{
-            'gstreamer-1.0-msvc-x86_64-1.26.10.msi' = 'a863bf3faa49e9f33bd3cc42967b473482d4dc98655ed95cba1ac59f26fb0cfb'
-            'gstreamer-1.0-devel-msvc-x86_64-1.26.10.msi' = '8487a115fea3b0b0b4c55a9a413ad1adab0fe78f6681feedc60858a48613a121'
+            "gstreamer-1.0-msvc-x86_64-$version.msi" = 'a863bf3faa49e9f33bd3cc42967b473482d4dc98655ed95cba1ac59f26fb0cfb'
+            "gstreamer-1.0-devel-msvc-x86_64-$version.msi" = '8487a115fea3b0b0b4c55a9a413ad1adab0fe78f6681feedc60858a48613a121'
           }
+          $cache = Join-Path $env:RUNNER_TEMP 'gstreamer-msi'
+          $null = New-Item -ItemType Directory -Force -Path $cache
           foreach ($entry in $files.GetEnumerator()) {
-            $msi = Join-Path $env:RUNNER_TEMP $entry.Key
-            Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi
-            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) { throw 'GStreamer checksum mismatch' }
+            $msi = Join-Path $cache $entry.Key
+            if (-not (Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) {
+              Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi
+            }
+            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) { throw "GStreamer checksum mismatch: $($entry.Key)" }
             $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart INSTALLDIR=C:\gstreamer ADDLOCAL=ALL" -PassThru -Wait
             if ($p.ExitCode -notin 0,3010) { throw "MSI failed: $($p.ExitCode)" }
           }
           'GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64' >> $env:GITHUB_ENV
       - name: Rust MSVC
+        id: rust
         shell: powershell
         run: |
           rustup update stable
           if ($LASTEXITCODE) { throw 'rustup failed' }
           rustup default stable
+          if ($LASTEXITCODE) { throw 'rustup default failed' }
           rustup target add x86_64-pc-windows-msvc
           if ($LASTEXITCODE) { throw 'rustup target failed' }
+          $release = rustc -V
+          if ($LASTEXITCODE) { throw 'rustc failed' }
+          "version=$($release -replace '[^0-9A-Za-z.]+','-')" >> $env:GITHUB_OUTPUT
+      - name: Cache Cargo downloads and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-windows-${{ steps.rust.outputs.version }}-gst${{ env.GSTREAMER_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-windows-${{ steps.rust.outputs.version }}-gst${{ env.GSTREAMER_VERSION }}-
       - name: Packaging regression tests (Windows PowerShell 5.1 and PowerShell 7)
         shell: powershell
         run: |
@@ -70,3 +125,32 @@ jobs:
           $env:PKG_CONFIG_PATH = "$root\lib\pkgconfig"
           cargo test --locked --target x86_64-pc-windows-msvc
           if ($LASTEXITCODE) { throw "cargo test failed: $LASTEXITCODE" }
+
+  release:
+    # Only after every build, packaging and test step above passed.
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Subdisc-Windows-x64-portable
+          path: release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum Subdisc-Windows-x64-portable.zip > SHA256SUMS.txt
+          files=(Subdisc-Windows-x64-portable.zip portable-validation.json SHA256SUMS.txt)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Subdisc $TAG (Windows x64 portátil)" --generate-notes
+          fi

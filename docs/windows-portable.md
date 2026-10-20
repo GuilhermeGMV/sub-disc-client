@@ -194,9 +194,30 @@ do chamador ficam intactos. Verifica:
    (`SetErrorMode`) para que a falha vire código de saída.
 
 `--portable-check <relatório.json>` não substitui o `--media-probe` (servidor
-real) nem muda protocolos. O workflow manual `.github/workflows/windows-portable.yml`
-instala o SDK oficial 1.26.10 com hashes fixos, roda os testes dos scripts em
-PowerShell 5.1 e 7, o build completo e `cargo test` em modo desenvolvimento.
+real) nem muda protocolos.
+
+### GitHub Actions
+
+`.github/workflows/windows-portable.yml` roda em `windows-2022` a cada push na
+`nolivekit` (commits que só alteram `.md` são ignorados, exceto
+`docs/windows-licenses.md`, que vai no pacote) e a cada tag `v*`. Ele instala o
+SDK oficial (`GSTREAMER_VERSION`, hoje 1.26.10, com SHA-256 fixos e cache dos
+instaladores), roda os testes dos scripts em PowerShell 5.1 e 7, o build
+completo e `cargo test` em modo desenvolvimento, com cache de Cargo/`target`.
+Um push novo na branch cancela o build anterior ainda em andamento.
+
+- Push na `nolivekit`: o ZIP e o relatório ficam em **Actions → execução →
+  Artifacts** (`Subdisc-Windows-x64-portable`, 90 dias, requer login). Em falha,
+  o artifact `portable-failure` traz o motivo.
+- Tag `v*` em um commit da `nolivekit` (ex.: `git tag v0.1.0 && git push origin v0.1.0`):
+  depois que tudo passa, um job separado, o único com permissão de escrita,
+  publica uma GitHub Release com o ZIP, `portable-validation.json` e
+  `SHA256SUMS.txt`. Tags fora da `nolivekit` são recusadas.
+- O botão **Run workflow** (`workflow_dispatch`) só aparece quando este arquivo
+  também existe na branch padrão; até lá, use push ou tag.
+
+Para trocar a versão do GStreamer, altere `GSTREAMER_VERSION` e os dois SHA-256
+dos instaladores (publicados em arquivos `.sha256sum` ao lado dos `.msi`).
 Um runner com SDK instalado não substitui uma máquina limpa.
 
 ## Validação de release em Windows limpo

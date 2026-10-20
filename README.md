@@ -96,6 +96,9 @@ Builds de desenvolvimento fora do layout portátil continuam usando o SDK global
 O build exige testes headless; `-Gui` acrescenta a demo em uma sessão interativa.
 Antes de distribuir uma release, valide duplo clique em Windows limpo e chamadas
 com dispositivos/servidor reais conforme a [matriz de testes](docs/windows-portable.md).
+O GitHub Actions gera o ZIP a cada push na `nolivekit` (em Artifacts da
+execução) e publica uma Release ao receber uma tag `v*`; veja
+[GitHub Actions](docs/windows-portable.md#github-actions).
 Consulte também [licenças e fontes correspondentes](docs/windows-licenses.md)
 e a [evidência de validação disponível](docs/windows-validation.md).
 
