@@ -8,12 +8,17 @@ mod bridge;
 mod capture;
 mod config;
 mod demo;
+mod media_probe;
 mod model;
+mod platform_audio;
+mod rtc;
 mod screen;
 mod ui;
 mod ui_capture;
 mod voice;
 mod ws;
+#[cfg(target_os = "linux")]
+mod x11_capture;
 
 use bridge::{Frames, UiSink};
 
@@ -30,6 +35,13 @@ fn main() -> eframe::Result {
         .enable_all()
         .build()
         .expect("runtime tokio");
+    if std::env::args().any(|arg| arg == "--media-probe") {
+        if let Err(e) = runtime.block_on(media_probe::run()) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, event_rx) = std::sync::mpsc::channel();
     let frames = Frames::default();

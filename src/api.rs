@@ -70,7 +70,7 @@ impl Api {
         self.session().map(|s| format!("subdisc_session={s}"))
     }
 
-    async fn request<T: DeserializeOwned>(
+    pub(crate) async fn request<T: DeserializeOwned>(
         &self,
         method: Method,
         path: &str,

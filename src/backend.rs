@@ -5,9 +5,9 @@ use crate::audio::{Volumes, user_of};
 use crate::bridge::{Command, Device, Event, Frames, LoginMode, UiSink};
 use crate::config::Config;
 use crate::model::ServerEvent;
+use crate::platform_audio::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use crate::voice::{self, VoiceCmd, VoiceHandle, VoiceSetup};
 use crate::ws::{self, PresenceOut, WsEvent};
-use livekit::{PlatformAudio, PlayoutDeviceId, RecordingDeviceId};
 use reqwest::StatusCode;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -224,6 +224,8 @@ impl Backend {
                     };
                     if result.is_err() {
                         self.ui.error("Não foi possível trocar o microfone.");
+                    } else {
+                        self.voice_cmd(VoiceCmd::ReapplyAudio);
                     }
                 }
             }
@@ -252,6 +254,7 @@ impl Backend {
                             .error("Não foi possível aplicar o processamento de áudio.");
                     }
                 }
+                self.voice_cmd(VoiceCmd::ReapplyAudio);
             }
         }
     }

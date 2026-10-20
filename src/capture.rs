@@ -1,81 +1,4 @@
 //! Contrato da seleção. Enumerar nunca inicia captura nem solicita mídia.
-use livekit::webrtc::desktop_capturer::{
-    DesktopCaptureSourceType, DesktopCapturer, DesktopCapturerOptions,
-};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
-
-/// Dono da thread nativa. Saída normal aguarda o join fora do executor;
-/// cancelamento de uma future também sinaliza parada e agenda o join.
-pub struct CaptureWorker {
-    stop: Arc<AtomicBool>,
-    done: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
-}
-
-impl CaptureWorker {
-    pub fn spawn(
-        run: impl FnOnce(Arc<AtomicBool>, Arc<AtomicBool>) + Send + 'static,
-    ) -> Result<Self, String> {
-        let stop = Arc::new(AtomicBool::new(false));
-        let done = Arc::new(AtomicBool::new(false));
-        let (stop_thread, done_thread) = (stop.clone(), done.clone());
-        let thread = std::thread::Builder::new()
-            .name("screen-capture".into())
-            .spawn(move || {
-                struct Finished(Arc<AtomicBool>);
-                impl Drop for Finished {
-                    fn drop(&mut self) {
-                        self.0.store(true, Ordering::Release);
-                    }
-                }
-                let _finished = Finished(done_thread.clone());
-                run(stop_thread, done_thread);
-            })
-            .map_err(|_| "Não foi possível iniciar a captura de tela.".to_owned())?;
-        Ok(Self {
-            stop,
-            done,
-            thread: Some(thread),
-        })
-    }
-
-    pub fn stop(&self) {
-        self.stop.store(true, Ordering::Release);
-        if let Some(thread) = &self.thread {
-            thread.thread().unpark();
-        }
-    }
-
-    pub fn finished(&self) -> bool {
-        self.done.load(Ordering::Acquire)
-    }
-
-    pub async fn close(&mut self) {
-        self.stop();
-        if let Some(thread) = self.thread.take() {
-            let _ = tokio::task::spawn_blocking(move || thread.join()).await;
-        }
-    }
-}
-
-impl Drop for CaptureWorker {
-    fn drop(&mut self) {
-        self.stop();
-        if let Some(thread) = self.thread.take() {
-            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-                runtime.spawn_blocking(move || {
-                    let _ = thread.join();
-                });
-            } else {
-                let _ = thread.join();
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureKind {
     Monitor,
@@ -113,16 +36,6 @@ pub fn uses_portal() -> bool {
     cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-pub fn source_type(kind: CaptureKind) -> Result<DesktopCaptureSourceType, String> {
-    match kind {
-        CaptureKind::Monitor => Ok(DesktopCaptureSourceType::Screen),
-        CaptureKind::Window => Ok(DesktopCaptureSourceType::Window),
-        #[cfg(target_os = "linux")]
-        CaptureKind::Portal if uses_portal() => Ok(DesktopCaptureSourceType::Generic),
-        _ => Err("Seletor do sistema indisponível nesta sessão.".into()),
-    }
-}
-
 pub fn enumerate() -> Result<Vec<CaptureSourceInfo>, String> {
     if uses_portal() {
         return Ok(vec![CaptureSourceInfo {
@@ -131,47 +44,114 @@ pub fn enumerate() -> Result<Vec<CaptureSourceInfo>, String> {
             kind: CaptureKind::Portal,
         }]);
     }
-    let mut result = vec![];
-    for kind in [CaptureKind::Monitor, CaptureKind::Window] {
-        let Some(capturer) = DesktopCapturer::new(DesktopCapturerOptions::new(source_type(kind)?))
-        else {
-            continue;
+    #[cfg(target_os = "linux")]
+    {
+        use x11rb::{
+            connection::Connection,
+            protocol::{randr::ConnectionExt as _, xproto::ConnectionExt as _},
         };
-        result.extend(
-            capturer
-                .get_source_list()
-                .into_iter()
-                .enumerate()
-                .map(|(index, source)| {
-                    let title = source.title();
-                    CaptureSourceInfo {
-                        id: source.id(),
-                        title: if title.trim().is_empty() {
-                            format!(
-                                "{} {}",
-                                if kind == CaptureKind::Monitor {
-                                    "Monitor"
-                                } else {
-                                    "Janela"
-                                },
-                                index + 1
-                            )
-                        } else {
-                            title
-                        },
-                        kind,
+        let (conn, screen) = x11rb::connect(None).map_err(|e| e.to_string())?;
+        let root = conn.setup().roots[screen].root;
+        let mut sources = vec![];
+        let monitors = conn
+            .randr_get_monitors(root, true)
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        for (index, monitor) in monitors.monitors.iter().enumerate() {
+            sources.push(CaptureSourceInfo {
+                id: monitor.name as u64,
+                title: format!(
+                    "Monitor {} ({}×{})",
+                    index + 1,
+                    monitor.width,
+                    monitor.height
+                ),
+                kind: CaptureKind::Monitor,
+            });
+        }
+        let list = conn
+            .intern_atom(false, b"_NET_CLIENT_LIST")
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?
+            .atom;
+        let name = conn
+            .intern_atom(false, b"_NET_WM_NAME")
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?
+            .atom;
+        let list_reply = conn
+            .get_property(
+                false,
+                root,
+                list,
+                x11rb::protocol::xproto::AtomEnum::WINDOW,
+                0,
+                4096,
+            )
+            .map_err(|e| e.to_string())?
+            .reply()
+            .map_err(|e| e.to_string())?;
+        let mut windows = list_reply
+            .value32()
+            .map(|v| v.collect::<Vec<_>>())
+            .unwrap_or_default();
+        if windows.is_empty() {
+            windows = conn
+                .query_tree(root)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .map_err(|e| e.to_string())?
+                .children;
+        }
+        for window in windows {
+            let visible = conn
+                .get_window_attributes(window)
+                .map_err(|e| e.to_string())?
+                .reply()
+                .is_ok_and(|v| v.map_state == x11rb::protocol::xproto::MapState::VIEWABLE);
+            if !visible {
+                continue;
+            }
+            for property in [name, x11rb::protocol::xproto::AtomEnum::WM_NAME.into()] {
+                if let Ok(reply) = conn
+                    .get_property(
+                        false,
+                        window,
+                        property,
+                        x11rb::protocol::xproto::AtomEnum::ANY,
+                        0,
+                        1024,
+                    )
+                    .map_err(|e| e.to_string())?
+                    .reply()
+                {
+                    let title = String::from_utf8_lossy(&reply.value).to_string();
+                    if !title.trim().is_empty() {
+                        sources.push(CaptureSourceInfo {
+                            id: window as u64,
+                            title,
+                            kind: CaptureKind::Window,
+                        });
+                        break;
                     }
-                }),
-        );
+                }
+            }
+        }
+        return if sources.is_empty() {
+            Err("Nenhuma fonte disponível".into())
+        } else {
+            Ok(sources)
+        };
     }
-    if result.is_empty() {
-        Err(
-            "Nenhum monitor ou janela disponível. Verifique as permissões e atualize as fontes."
-                .into(),
-        )
-    } else {
-        Ok(result)
+    #[cfg(target_os = "windows")]
+    {
+        return crate::screen::windows_sources();
     }
+    #[allow(unreachable_code)]
+    Err("Captura não suportada neste sistema".into())
 }
 
 pub fn selected<'a>(
@@ -225,42 +205,5 @@ mod tests {
             assert_eq!(request.validate(true).is_ok(), video || audio);
             assert_eq!(request.validate(false).is_ok(), video && !audio);
         }
-    }
-
-    #[tokio::test]
-    async fn worker_cleanup_on_stop_failure_and_cancel() {
-        use std::sync::atomic::AtomicUsize;
-        let active = Arc::new(AtomicUsize::new(0));
-        for _ in 0..16 {
-            let count = active.clone();
-            let mut worker = CaptureWorker::spawn(move |stop, _done| {
-                count.fetch_add(1, Ordering::SeqCst);
-                while !stop.load(Ordering::Acquire) {
-                    std::thread::park_timeout(std::time::Duration::from_millis(5));
-                }
-                count.fetch_sub(1, Ordering::SeqCst);
-            })
-            .unwrap();
-            worker.close().await;
-            assert!(worker.finished());
-            assert_eq!(active.load(Ordering::SeqCst), 0);
-        }
-        let mut failed =
-            CaptureWorker::spawn(|_, _| { /* fonte removida / permissão negada */ }).unwrap();
-        failed.close().await;
-        assert!(failed.finished());
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let cancelled = CaptureWorker::spawn(move |stop, _| {
-            while !stop.load(Ordering::Acquire) {
-                std::thread::park_timeout(std::time::Duration::from_millis(5));
-            }
-            let _ = tx.send(());
-        })
-        .unwrap();
-        drop(cancelled);
-        tokio::time::timeout(std::time::Duration::from_secs(1), rx)
-            .await
-            .unwrap()
-            .unwrap();
     }
 }

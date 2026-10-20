@@ -91,9 +91,11 @@ pub trait PlaybackTrack {
     fn set_gain(&self, gain: f32) -> bool;
 }
 
-impl PlaybackTrack for livekit::prelude::RemoteAudioTrack {
+impl PlaybackTrack for gstreamer::Element {
     fn set_gain(&self, gain: f32) -> bool {
-        self.rtc_track().set_playback_volume(f64::from(gain))
+        use gstreamer::prelude::*;
+        self.set_property("volume", f64::from(gain));
+        true
     }
 }
 
@@ -286,19 +288,5 @@ mod tests {
         playback.clear();
         assert_eq!(Rc::strong_count(&replacement), 1);
         assert_eq!(Rc::strong_count(&second_user), 1);
-    }
-
-    #[test]
-    fn native_binding_rejects_local_source_without_opening_microphone() {
-        use livekit::prelude::LocalAudioTrack;
-        use livekit::webrtc::audio_source::native::NativeAudioSource;
-        use livekit::webrtc::audio_source::{AudioSourceOptions, RtcAudioSource};
-        // Synthetic source, no PlatformAudio, room, capture or physical device.
-        for _ in 0..16 {
-            let source = NativeAudioSource::new(AudioSourceOptions::default(), 48_000, 1, 0);
-            let track =
-                LocalAudioTrack::create_audio_track("test-local", RtcAudioSource::Native(source));
-            assert!(!track.rtc_track().set_playback_volume(0.35));
-        }
     }
 }

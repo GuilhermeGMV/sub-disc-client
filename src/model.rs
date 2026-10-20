@@ -1,5 +1,7 @@
 //! Tipos do contrato HTTP/WebSocket v1 do servidor (ver docs/api.md do Subdisc).
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+#[cfg(test)]
+use serde::Serialize;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct User {
@@ -78,8 +80,11 @@ pub struct JoinResponse {
     pub url: String,
     pub token: String,
     pub lease: String,
+    #[serde(rename = "iceServers", default)]
+    pub ice_servers: serde_json::Value,
 }
 
+#[cfg(test)]
 #[derive(Serialize)]
 pub struct MediaEvent<'a> {
     pub v: u32,

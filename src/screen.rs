@@ -1,400 +1,311 @@
-//! Compartilhamento de tela com o capturador do próprio libwebrtc. No Wayland ele
-//! abre o seletor do portal (xdg-desktop-portal + PipeWire); no X11 e no Windows
-//! captura exclusivamente o monitor ou janela confirmado pelo usuário.
-use crate::capture::{self, CaptureKind, CaptureWorker, ShareRequest};
-use livekit::options::{TrackPublishOptions, VideoCodec, VideoEncoding};
-use livekit::prelude::*;
-use livekit::webrtc::desktop_capturer::{
-    CaptureError, DesktopCapturer, DesktopCapturerOptions, DesktopFrame,
+//! Capture only the explicitly selected monitor/window. Wayland uses the portal.
+use crate::{
+    api::Api,
+    capture::{self, CaptureKind, ShareRequest},
+    rtc::{Rtc, Source},
 };
-use livekit::webrtc::native::yuv_helper;
-use livekit::webrtc::video_frame::{I420Buffer, VideoFrame, VideoRotation};
-use livekit::webrtc::video_source::native::NativeVideoSource;
-use livekit::webrtc::video_source::{RtcVideoSource, VideoResolution};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio::sync::oneshot;
-
-const FPS: u64 = 15;
-/// Tempo para a pessoa escolher a tela no seletor do portal.
-const PICK_TIMEOUT: Duration = Duration::from_secs(120);
-
+use gstreamer::prelude::*;
+use serde_json::Value;
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 pub struct ScreenShare {
-    worker: CaptureWorker,
-    publication: Option<(LocalParticipant, TrackSid)>,
+    pub rtc: Rtc,
+    _capture: Capture,
 }
-
-impl ScreenShare {
-    /// Abre o seletor, espera o primeiro frame e publica a faixa de tela.
-    pub async fn start(
-        local: LocalParticipant,
-        request: ShareRequest,
-        mut cancel: oneshot::Receiver<()>,
-    ) -> Result<Self, String> {
-        request.validate(false)?;
-        let source = NativeVideoSource::new(
-            VideoResolution {
-                width: 1920,
-                height: 1080,
-            },
-            true,
-        );
-        let (ready_tx, ready_rx) = oneshot::channel();
-        let capture_source = source.clone();
-        let worker = CaptureWorker::spawn(move |stop, done| {
-            capture_loop(capture_source, stop, done, ready_tx, request)
-        })?;
-        let mut share = Self {
-            worker,
-            publication: None,
-        };
-        let ready = tokio::select! {
-            result = tokio::time::timeout(PICK_TIMEOUT, ready_rx) => result,
-            _ = &mut cancel => return Err("Compartilhamento cancelado.".into()),
-        };
-        match ready {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(e))) => return Err(e),
-            _ => {
-                share.stop();
-                return Err("O compartilhamento de tela não começou a tempo.".into());
-            }
-        }
-        let track = LocalVideoTrack::create_video_track("screen", RtcVideoSource::Native(source));
-        let options = TrackPublishOptions {
-            source: TrackSource::Screenshare,
-            video_codec: VideoCodec::VP8,
-            video_encoding: Some(VideoEncoding {
-                max_bitrate: 2_500_000,
-                max_framerate: FPS as f64,
-            }),
-            simulcast: false,
-            ..Default::default()
-        };
-        match local.publish_track(LocalTrack::Video(track), options).await {
-            Ok(publication) => {
-                share.publication = Some((local, publication.sid()));
-                if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
-                    share.close().await;
-                    return Err("Compartilhamento cancelado.".into());
-                }
-                Ok(share)
-            }
-            Err(e) => {
-                share.stop();
-                log::warn!("falha ao publicar a tela: {e}");
-                Err("Não foi possível publicar a tela.".into())
-            }
-        }
-    }
-
-    pub async fn close(mut self) {
-        self.worker.close().await;
-        if let Some((local, sid)) = self.publication.take() {
-            let _ = local.unpublish_track(&sid).await;
-        }
-    }
-
-    pub fn stop(&self) {
-        self.worker.stop();
-    }
-
-    /// A captura terminou por conta própria (seletor cancelado, fonte encerrada).
-    pub fn finished(&self) -> bool {
-        self.worker.finished()
-    }
+pub struct Capture {
+    pub description: String,
+    #[cfg(target_os = "linux")]
+    x11: Option<capture::CaptureSourceInfo>,
+    #[cfg(target_os = "linux")]
+    session: Option<ashpd::desktop::Session<ashpd::desktop::screencast::Screencast>>,
+    #[cfg(target_os = "linux")]
+    _fd: Option<std::os::fd::OwnedFd>,
 }
-
-impl Drop for ScreenShare {
+impl Drop for Capture {
     fn drop(&mut self) {
-        self.stop();
-        if let Some((local, sid)) = self.publication.take() {
+        #[cfg(target_os = "linux")]
+        if let Some(session) = self.session.take() {
             tokio::spawn(async move {
-                let _ = local.unpublish_track(&sid).await;
+                let _ = session.close().await;
             });
         }
     }
 }
-
-type Ready = Arc<Mutex<Option<oneshot::Sender<Result<(), String>>>>>;
-
-fn capture_loop(
-    source: NativeVideoSource,
-    stop: Arc<AtomicBool>,
-    done: Arc<AtomicBool>,
-    ready_tx: oneshot::Sender<Result<(), String>>,
-    request: ShareRequest,
-) {
-    let ready: Ready = Arc::new(Mutex::new(Some(ready_tx)));
-    let signal = |ready: &Ready, result: Result<(), String>| {
-        if let Some(tx) = ready.lock().unwrap().take() {
-            let _ = tx.send(result);
+impl Capture {
+    pub fn attach(&self, source: Option<gstreamer::Element>) -> Result<(), String> {
+        #[cfg(target_os = "linux")]
+        if let Some(selected) = &self.x11 {
+            crate::x11_capture::attach(source.ok_or("Fonte X11 ausente")?, selected.clone())?;
         }
-    };
-    let kind = request.source.kind;
-    // Reject forged/direct X11 requests in a Wayland session.
-    if capture::uses_portal() != (kind == CaptureKind::Portal) {
-        done.store(true, Ordering::Relaxed);
-        signal(
-            &ready,
-            Err("Escolha a fonte no seletor autorizado do sistema.".into()),
-        );
-        return;
+        #[cfg(not(target_os = "linux"))]
+        let _ = source;
+        Ok(())
     }
-    let source_type = match capture::source_type(kind) {
-        Ok(kind) => kind,
-        Err(error) => {
-            done.store(true, Ordering::Relaxed);
-            signal(&ready, Err(error));
-            return;
-        }
-    };
-    let mut options = DesktopCapturerOptions::new(source_type);
-    options.set_include_cursor(true);
-    let Some(mut capturer) = DesktopCapturer::new(options) else {
-        done.store(true, Ordering::Relaxed);
-        signal(
-            &ready,
-            Err("Captura indisponível ou permissão negada.".into()),
-        );
-        return;
-    };
-    let selected = if kind == CaptureKind::Portal {
-        None
-    } else {
-        // Re-enumerate on the actual capturer: never silently capture another source.
-        let sources = capturer.get_source_list();
-        let selected = sources
-            .into_iter()
-            .enumerate()
-            .find(|(index, s)| {
-                let title = s.title();
-                let title = if title.trim().is_empty() {
-                    format!(
-                        "{} {}",
-                        if kind == CaptureKind::Monitor {
-                            "Monitor"
-                        } else {
-                            "Janela"
-                        },
-                        index + 1
-                    )
-                } else {
-                    title
-                };
-                let info = capture::CaptureSourceInfo {
-                    id: s.id(),
-                    title,
-                    kind,
-                };
-                capture::selected(std::slice::from_ref(&info), &request.source).is_ok()
-            })
-            .map(|(_, s)| s);
-        if selected.is_none() {
-            done.store(true, Ordering::Relaxed);
-            signal(
-                &ready,
-                Err("A fonte foi fechada ou desconectada. Atualize a lista.".into()),
-            );
-            return;
-        }
-        selected
-    };
-    let callback = {
-        let (ready, done) = (ready.clone(), done.clone());
-        let started = Instant::now();
-        move |result: Result<DesktopFrame, CaptureError>| match result {
-            Ok(frame) => {
-                if let Some(buffer) = to_i420(&frame) {
-                    let timestamp_us = started.elapsed().as_micros() as i64;
-                    let frame = VideoFrame {
-                        rotation: VideoRotation::VideoRotation0,
-                        timestamp_us,
-                        frame_metadata: None,
-                        buffer,
-                    };
-                    source.capture_frame(&frame);
-                    signal(&ready, Ok(()));
-                }
-            }
-            Err(CaptureError::Temporary) => {}
-            Err(CaptureError::Permanent) => {
-                done.store(true, Ordering::Relaxed);
-                signal(&ready, Err("Compartilhamento de tela cancelado.".into()));
-            }
-        }
-    };
-    if !capturer.start_capture(selected, callback) {
-        done.store(true, Ordering::Relaxed);
-        signal(
-            &ready,
-            Err("A fonte selecionada não está mais disponível ou a permissão foi negada.".into()),
-        );
-        return;
-    }
-    let interval = Duration::from_millis(1000 / FPS);
-    let mut checked = Instant::now();
-    while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
-        let tick = Instant::now();
-        if kind != CaptureKind::Portal && checked.elapsed() >= Duration::from_secs(1) {
-            checked = Instant::now();
-            if !capturer
-                .get_source_list()
-                .iter()
-                .any(|s| s.id() == request.source.id)
+    pub async fn select(request: ShareRequest) -> Result<Self, String> {
+        request.validate(false)?;
+        let mut capture = Self {
+            description: String::new(),
+            #[cfg(target_os = "linux")]
+            x11: None,
+            #[cfg(target_os = "linux")]
+            session: None,
+            #[cfg(target_os = "linux")]
+            _fd: None,
+        };
+        if request.source.kind == CaptureKind::Portal {
+            #[cfg(target_os = "linux")]
             {
-                done.store(true, Ordering::Relaxed);
-                signal(&ready, Err("A fonte compartilhada foi encerrada.".into()));
-                break;
+                use ashpd::desktop::screencast::{
+                    CursorMode, Screencast, SelectSourcesOptions, SourceType,
+                };
+                let portal = Screencast::new().await.map_err(|e| e.to_string())?;
+                let session = portal
+                    .create_session(Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                capture.session = Some(session);
+                let session = capture.session.as_ref().unwrap();
+                portal
+                    .select_sources(
+                        session,
+                        SelectSourcesOptions::default()
+                            .set_sources(SourceType::Monitor | SourceType::Window)
+                            .set_multiple(false)
+                            .set_cursor_mode(CursorMode::Embedded),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .response()
+                    .map_err(|e| e.to_string())?;
+                let streams = portal
+                    .start(session, None, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .response()
+                    .map_err(|e| e.to_string())?;
+                let node = streams
+                    .streams()
+                    .first()
+                    .ok_or("Nenhuma tela escolhida")?
+                    .pipe_wire_node_id();
+                let fd = portal
+                    .open_pipe_wire_remote(session, Default::default())
+                    .await
+                    .map_err(|e| e.to_string())?;
+                capture.description = format!(
+                    "pipewiresrc fd={} path={} do-timestamp=true",
+                    fd.as_raw_fd(),
+                    node
+                );
+                capture._fd = Some(fd);
+                return Ok(capture);
             }
+            #[cfg(not(target_os = "linux"))]
+            return Err("Portal indisponível".into());
         }
-        capturer.capture_frame();
-        std::thread::park_timeout(interval.saturating_sub(tick.elapsed()));
+        capture::selected(&capture::enumerate()?, &request.source)?;
+        #[cfg(target_os = "linux")]
+        {
+            capture.description =
+                "appsrc name=screen_source is-live=true format=time do-timestamp=true block=false"
+                    .into();
+            capture.x11 = Some(request.source);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            capture.description = format!(
+                "d3d11screencapturesrc capture-api=wgc {}={} ! d3d11download",
+                if request.source.kind == CaptureKind::Window {
+                    "window-handle"
+                } else {
+                    "monitor-handle"
+                },
+                request.source.id
+            );
+        }
+        if capture.description.is_empty() {
+            return Err("Captura indisponível neste sistema".into());
+        }
+        Ok(capture)
     }
-    done.store(true, Ordering::Relaxed);
+}
+impl ScreenShare {
+    pub async fn start(
+        api: &Api,
+        lease: &str,
+        ice: &Value,
+        request: ShareRequest,
+    ) -> Result<Self, String> {
+        let capture = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            Capture::select(request),
+        )
+        .await
+        .map_err(|_| "Tempo de seleção de tela esgotado")??;
+        let mut rtc = Rtc::publisher(Source::ScreenShare, &capture.description, None, false)?;
+        capture.attach(rtc.pipeline.by_name("screen_source"))?;
+        rtc.negotiate(api, lease, ice, None).await?;
+        Ok(Self {
+            rtc,
+            _capture: capture,
+        })
+    }
+    pub async fn recover(self, api: &Api, lease: &str, ice: &Value) -> Result<Self, String> {
+        let Self { rtc, _capture } = self;
+        rtc.close(api, lease).await;
+        let mut rtc = Rtc::publisher(Source::ScreenShare, &_capture.description, None, false)?;
+        _capture.attach(rtc.pipeline.by_name("screen_source"))?;
+        rtc.negotiate(api, lease, ice, None).await?;
+        Ok(Self { rtc, _capture })
+    }
+    pub fn finished(&mut self) -> bool {
+        self.rtc.poll();
+        self.rtc.failed()
+    }
+    pub async fn close(self, api: &Api, lease: &str) {
+        self.rtc.close(api, lease).await;
+    }
 }
 
-/// Frames do capturador vêm em BGRA ("ARGB" no libyuv).
-fn to_i420(frame: &DesktopFrame) -> Option<I420Buffer> {
-    let (width, height) = (frame.width(), frame.height());
-    if width <= 0 || height <= 0 {
-        return None;
+#[cfg(target_os = "windows")]
+pub fn windows_sources() -> Result<Vec<capture::CaptureSourceInfo>, String> {
+    use windows_sys::Win32::{
+        Foundation::{HWND, LPARAM, RECT},
+        Graphics::Gdi::{EnumDisplayMonitors, HDC, HMONITOR},
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowTextLengthW, GetWindowTextW, IsWindowVisible,
+        },
+    };
+    use windows_sys::core::BOOL;
+    unsafe extern "system" fn window(hwnd: HWND, data: LPARAM) -> BOOL {
+        let sources = unsafe { &mut *(data as *mut Vec<capture::CaptureSourceInfo>) };
+        if unsafe { IsWindowVisible(hwnd) } != 0 {
+            let len = unsafe { GetWindowTextLengthW(hwnd) };
+            if len > 0 {
+                let mut title = vec![0u16; len as usize + 1];
+                let count = unsafe { GetWindowTextW(hwnd, title.as_mut_ptr(), title.len() as i32) };
+                sources.push(capture::CaptureSourceInfo {
+                    id: hwnd as u64,
+                    title: String::from_utf16_lossy(&title[..count as usize]),
+                    kind: CaptureKind::Window,
+                });
+            }
+        }
+        1
     }
-    let mut buffer = I420Buffer::new(width as u32, height as u32);
-    let (stride_y, stride_u, stride_v) = buffer.strides();
-    let (y, u, v) = buffer.data_mut();
-    yuv_helper::argb_to_i420(
-        frame.data(),
-        frame.stride(),
-        y,
-        stride_y,
-        u,
-        stride_u,
-        v,
-        stride_v,
-        width,
-        height,
-    );
-    Some(buffer)
+    unsafe extern "system" fn monitor(
+        handle: HMONITOR,
+        _: HDC,
+        _: *mut RECT,
+        data: LPARAM,
+    ) -> BOOL {
+        let sources = unsafe { &mut *(data as *mut Vec<capture::CaptureSourceInfo>) };
+        sources.push(capture::CaptureSourceInfo {
+            id: handle as u64,
+            title: format!("Monitor {}", sources.len() + 1),
+            kind: CaptureKind::Monitor,
+        });
+        1
+    }
+    let mut sources = vec![];
+    unsafe {
+        EnumDisplayMonitors(
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            Some(monitor),
+            &mut sources as *mut _ as LPARAM,
+        );
+        EnumWindows(Some(window), &mut sources as *mut _ as LPARAM);
+    }
+    Ok(sources)
 }
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
-
+    use gstreamer as gst;
     #[tokio::test]
-    #[ignore = "requer Xvfb e SUBDISC_TEST_CAPTURE=1; nunca executar no desktop pessoal"]
+    #[ignore = "requires isolated Xvfb and SUBDISC_TEST_CAPTURE=1"]
     async fn x11_sources_selection_removal_and_native_cleanup() {
         assert_eq!(std::env::var("SUBDISC_TEST_CAPTURE").as_deref(), Ok("1"));
-        assert!(!capture::uses_portal());
-        struct Window(std::process::Child);
-        impl Drop for Window {
+        let mut window = std::process::Command::new("xmessage")
+            .args([
+                "-title",
+                "Subdisc synthetic capture",
+                "-geometry",
+                "320x200",
+                "Synthetic test content",
+            ])
+            .spawn()
+            .unwrap();
+        struct Stop(u32);
+        impl Drop for Stop {
             fn drop(&mut self) {
-                let _ = self.0.kill();
-                let _ = self.0.wait();
+                unsafe {
+                    libc::kill(self.0 as i32, libc::SIGTERM);
+                }
             }
         }
-        let mut window = Window(
-            std::process::Command::new("xmessage")
-                .args([
-                    "-title",
-                    "subdisc-capture-test",
-                    "Conteúdo sintético autorizado para teste",
-                ])
-                .spawn()
-                .unwrap(),
-        );
-        let sources = tokio::time::timeout(Duration::from_secs(5), async {
+        let stop = Stop(window.id());
+        let source = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                // Xvfb has no WM: mark only our synthetic window as mapped/normal,
-                // as a real window manager would (ICCCM WM_STATE).
-                let _ = std::process::Command::new("xprop")
-                    .args([
-                        "-name",
-                        "subdisc-capture-test",
-                        "-f",
-                        "WM_STATE",
-                        "32c",
-                        "-set",
-                        "WM_STATE",
-                        "1, 0",
-                    ])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
-                let sources = capture::enumerate().unwrap_or_default();
-                if sources.iter().any(|s| s.title == "subdisc-capture-test") {
-                    break sources;
+                if let Some(source) = capture::enumerate()
+                    .unwrap()
+                    .into_iter()
+                    .find(|v| v.title == "Subdisc synthetic capture")
+                {
+                    break source;
                 }
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
         })
         .await
         .unwrap();
-        assert!(sources.iter().any(|s| s.kind == CaptureKind::Monitor));
-        let selected = sources
-            .into_iter()
-            .find(|s| s.title == "subdisc-capture-test")
-            .unwrap();
-        assert_eq!(selected.kind, CaptureKind::Window);
-        let source = NativeVideoSource::new(
-            VideoResolution {
-                width: 640,
-                height: 480,
-            },
-            true,
-        );
-        let (tx, rx) = oneshot::channel();
         let request = ShareRequest {
-            source: selected.clone(),
+            source: source.clone(),
             video: true,
             audio: false,
         };
-        let mut worker =
-            CaptureWorker::spawn(move |stop, done| capture_loop(source, stop, done, tx, request))
-                .unwrap();
-        tokio::time::timeout(Duration::from_secs(5), rx)
-            .await
+        let capture = Capture::select(request.clone()).await.unwrap();
+        gst::init().unwrap();
+        let pipeline = gst::parse::launch(&format!(
+            "{} ! videoconvert ! appsink name=frames max-buffers=1 drop=true sync=false",
+            capture.description
+        ))
+        .unwrap()
+        .downcast::<gst::Pipeline>()
+        .unwrap();
+        capture.attach(pipeline.by_name("screen_source")).unwrap();
+        let weak = pipeline.downgrade();
+        let sink = pipeline
+            .by_name("frames")
             .unwrap()
-            .unwrap()
+            .downcast::<gstreamer_app::AppSink>()
             .unwrap();
-        window.0.kill().unwrap();
-        window.0.wait().unwrap();
-        tokio::time::timeout(Duration::from_secs(3), async {
-            while !worker.finished() {
-                tokio::time::sleep(Duration::from_millis(20)).await;
+        pipeline.set_state(gst::State::Playing).unwrap();
+        let sample = sink
+            .try_pull_sample(gst::ClockTime::from_seconds(5))
+            .expect("selected window must produce pixels");
+        assert!(sample.buffer().unwrap().size() > 0);
+        window.kill().unwrap();
+        window.wait().unwrap();
+        std::mem::forget(stop);
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if capture::selected(&capture::enumerate().unwrap(), &source).is_err() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
         .unwrap();
-        worker.close().await;
-
-        // Removed source must fail before the first frame, with no default fallback.
-        let source = NativeVideoSource::new(
-            VideoResolution {
-                width: 640,
-                height: 480,
-            },
-            true,
-        );
-        let (tx, rx) = oneshot::channel();
-        let request = ShareRequest {
-            source: selected,
-            video: true,
-            audio: false,
-        };
-        let mut worker =
-            CaptureWorker::spawn(move |stop, done| capture_loop(source, stop, done, tx, request))
-                .unwrap();
-        assert!(
-            tokio::time::timeout(Duration::from_secs(3), rx)
-                .await
-                .unwrap()
-                .unwrap()
-                .is_err()
-        );
-        worker.close().await;
-        assert!(worker.finished());
+        assert!(Capture::select(request).await.is_err());
+        pipeline.set_state(gst::State::Null).unwrap();
+        drop(sample);
+        drop(sink);
+        drop(pipeline);
+        drop(capture);
+        assert!(weak.upgrade().is_none());
     }
 }

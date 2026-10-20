@@ -1,73 +1,107 @@
-# Validação desta implementação
+# Validação da migração de mídia
 
-Ambiente: Linux x86_64, 19/10/2026. Dependências nativas já disponíveis em
-`.deps/`; `scripts/cargo.sh` usa a toolchain local e carrega esse ambiente.
-Não houve execução em Windows nem numa sessão Wayland.
+Ambiente: Linux x86_64, 19–20/10/2026, Rust 1.99.1, Node.js 24.13.1,
+Chromium 156/Playwright e GStreamer 1.24.2. Plugin de voz oficial 1.22.12
+compilado localmente para a biblioteca de processamento de áudio 0.3 disponível.
+Somente as branches `nolivekit` foram usadas; não houve merge.
 
-## Comandos executados e aprovados
+## Executado
+
+| Verificação | Resultado |
+|---|---|
+| Testes Rust do desktop | 16 aprovados; 2 integrações opt-in ignoradas por padrão |
+| Clippy desktop, `--all-targets -- -D warnings` | Aprovado |
+| Build desktop release | Aprovado |
+| Teste X11 opt-in em Xvfb | Aprovado: captura, remoção da janela, rejeição de fonte removida e destruição do pipeline |
+| DSP/mixer reais, quatro ciclos de inicialização e teardown | Aprovado; referências fracas de pipeline, bin e DSP deixam de existir |
+| Reconexão da sinalização desktop com o mesmo lease e heartbeat | Aprovado |
+| Dois atores de voz nativos com SFU real | Aprovado: PCM recebido, mute, deafen, volume, recriação de áudio e saída limpa |
+| Dois navegadores com SFU real | Aprovado: chat, áudio com energia, câmera decodificada, tela, volumes, mute/deafen, indicador de fala, exclusividade e saída |
+| Perda de sinalização + fechamento de PeerConnections | Aprovado: nova negociação, áudio e vídeo retomados |
+| Ofertas recusadas durante recuperação | Aprovado: duas respostas HTTP 503, depois vídeo retomado com bitrate preservado |
+| Áudio estéreo de tela gerado no navegador | Aprovado: energia decodificada, mute e volumes independentes, saída limpa e caso sem áudio |
+| Navegador ↔ desktop com fontes sintéticas | Aprovado: vídeo reproduzido no Chromium; áudio e vídeo decodificados no desktop |
+| Fluxo contínuo X11 por 120 s, com republicação aos 60 s | Aprovado; 5.922 buffers de áudio e 2.361 frames decodificados no desktop, vídeo da nova publicação reproduzido no navegador |
+| Janela X11 real, sintética, transmitida ao navegador | Aprovado em Xvfb isolado; 1.184 buffers de áudio e 466 frames recebidos pelo desktop na execução curta |
+| Simulcast/dynacast entre navegadores | Aprovado: `l`/`m`/`h` publicadas, receptor em `h` (1280 px), `m` (640 px) em viewport de celular, volta a `h`; nenhuma camada codificada com o vídeo fora da tela e retomada com frames novos |
+| Encaminhamento de pacotes Chrome com extensões e padding | Corrigido e coberto por teste do SFU; antes, a primeira escrita falhava e encerrava o vídeo do assinante |
+| Sinalização presa em fechamento | Aprovado: o navegador detecta o socket morto, mostra “Reconectando…” e recupera; 3/3 execuções após a correção |
+| Plugins GStreamer ausentes | Mensagem explícita (ex.: `nicesrc, nicesink`) em vez de erro de ligação de caps |
+| ICE desktop ↔ SFU com IPv6 link-local na máquina | Antes: ~1 em 5 execuções com um transporte preso em “conectando” e 2.000 `bind` falhos por transporte. Depois de filtrar `fe80::/10`: 15/15 |
+| Sondas de padding do Chrome na camada `h` | Descartadas com renumeração RTP; teste cobre reordenação e volta do contador |
+| Recepção de vídeo no desktop, 15 execuções de 15 s | Antes da correção da fila: 7–246 frames. Depois: 252–271 em 14 execuções; uma com início tardio da chamada (32) |
+| `--demo` e `--dev-ui` em Xvfb com strace | Aprovado: sem rede IP, sem dispositivos de mídia e sem acesso/alteração de credenciais |
+| API/backend | 6 testes SFU + 8 testes de API aprovados |
+| Frontend | Typecheck sem erros/avisos; 6 testes unitários e build aprovados |
+| Reinício do servidor | Contas, cookies, canais e histórico preservados |
+| Compose, inclusive overlays TURN/TLS | Sintaxe validada com credenciais fictícias |
+
+A primeira versão com `ximagesrc` falhou ao destruir a janela com BadDamage.
+Foi substituída por captura X11 em Rust através de requisições verificadas,
+ligada ao GStreamer por appsrc. A regressão foi reproduzida e o teste passou
+após a correção. Uma fonte inválida não é substituída pela tela inteira.
+
+Na execução completa curta, estatísticas locais mostraram RTT de candidatos
+entre 0–1 ms e buffer de áudio de 20 ms; outra execução registrou cerca de
+42 ms de buffer. São amostras de loopback, não latência ponta a ponta ou
+benchmark da internet. Frames decodificados e energia são exigidos, não apenas bytes.
+
+## Reproduzir
 
 ```bash
-scripts/cargo.sh fmt --all -- --check
-scripts/cargo.sh check --locked
 scripts/cargo.sh test --locked
 scripts/cargo.sh clippy --all-targets --locked -- -D warnings
 scripts/cargo.sh build --release --locked
+. .deps/env.sh # quando as dependências locais forem utilizadas
 python3 scripts/check-demo.py --native-capture
+scripts/cargo.sh build --locked
+SUBDISC_NATIVE_BINARY="$PWD/target/debug/subdisc-client" \
+  npm --prefix ../sub-disc/frontend run test:e2e
+python3 scripts/test-media-x11.py
 ```
 
-- Suíte padrão: **16 aprovados**, zero falhas e um teste X11 ignorado por
-  padrão, pois requer captura num display sintético autorizado.
-- Teste X11 executado separadamente pelo script: **um aprovado**. Enumera
-  monitor e janela, inicia captura da janela sintética selecionada, detecta
-  encerramento dessa janela, faz join do worker e rejeita a fonte removida.
-- Ambos `--demo` e `--dev-ui` abriram e fecharam normalmente em Xvfb, usando
-  o release, sem servidor ou autenticação.
-- Inspeção das imagens sintéticas: chamada com cinco cartões, dois
-  compartilhamentos e câmera, expansão de vídeo, modal de fontes e janela de
-  dispositivos. Os cliques são injetados somente no Xvfb do script.
-- Auditoria `strace` das duas execuções: nenhum socket IP, nenhum acesso a
-  `/dev/snd`, `/dev/video` ou `/dev/media`, nenhuma abertura do arquivo de
-  configuração de login e nenhuma alteração no arquivo sentinela de login.
-  Sockets Unix de X11/desktop são necessários à janela.
-- `git diff --check` aprovado. O arquivo `package-lock.json` já existente e
-  não rastreado foi preservado.
+Os dois cenários E2E também passaram com os binários release do servidor e do
+cliente. A execução contínua abaixo foi repetida em release; os contadores da
+tabela são dessa rodada. São exigidos frames decodificados e progresso após a
+republicação, e os números variam conforme a sincronização e os recursos locais.
 
-O build nativo avisa que libva/CUDA não estão disponíveis. Isso desabilita
-aceleração de codecs por essas APIs; não impediu compilação, testes ou a
-renderização por software usada no Xvfb.
+Para testar o ator nativo com áudio sintético, sem dispositivos físicos, compile
+primeiro o servidor em release e execute:
 
-## Cobertura automatizada
+```bash
+scripts/cargo.sh test native_voice_actors_audio_controls_devices_and_cleanup --locked -- --ignored
+```
 
-Áudio: limites e padrão, mute individual/global, independência entre usuários e
-fontes, persistência serializada, compatibilidade com configuração antiga,
-isolamento por servidor, troca/reaplicação/liberação de tracks com mocks,
-rampa e recusa de ganho em fonte local pela ponte C++ real. O registro mantém
-uma única referência de playout por SID e não cria um caminho PCM adicional.
+`SUBDISC_TEST_SERVER_BINARY` permite selecionar outro binário do servidor.
+Esse teste inicia dois atores de produção, exige voz remota decodificada e
+observa a interrupção e retomada após recriar o áudio. O teste de reconexão da
+sinalização é separado. O teste X11 opt-in usa o runner `check-demo.py`.
 
-Captura: escolha por ID/tipo/título sem fallback, fonte removida, combinações de
-vídeo/áudio respeitando capacidades, resultados atrasados do modal ignorados,
-stop/falha/cancelamento de workers e joins repetidos. O teste opt-in também
-exercita enumeração e frames do capturador X11 real num display sintético.
+Para uma execução contínua mais longa com republicação da fonte:
 
-Demo: cenário, mensagens, entrar/sair de chamada, volumes após reentrada,
-transmissão simulada com vídeo/áudio separados, limpeza de frames, inicialização
-do backend, modais e renderização compartilhada do egui.
+```bash
+SUBDISC_INTEROP_SECONDS=120 SUBDISC_PROBE_REPUBLISH_AT=60 \
+  python3 scripts/test-media-x11.py
+```
 
-## Não executado / pendências
+Esse runner cria seu próprio Xvfb e uma janela sintética. Não usa o desktop
+pessoal. A sonda reutiliza os mesmos codecs, HTTP, sinalização e pipelines de
+recepção da aplicação. Rejeita captura de janela sem opt-in de teste explícito.
 
-- `scripts/build-windows.ps1`, testes Windows e captura/áudio WASAPI: falta
-  ambiente Windows. O script agora usa `--locked`.
-- Portal Wayland/PipeWire: falta sessão Wayland autorizada para exercitar
-  concessão/negação, cancelamento e hotplug.
-- Chamada real Subdisc/LiveKit entre dois usuários, medição da amplitude de
-  saída, latência, AEC e troca de dispositivo físico: sem servidor/contas e
-  dispositivos de teste. Testes com mocks não comprovam qualidade acústica.
-- O ganho acima de 100% usa a saturação nativa do WebRTC. Um limiter por fonte
-  para evitar clipping em material alto continua pendente.
-- Envio real de áudio da tela e compartilhamento real de abas não foram
-  implementados. O modal informa a indisponibilidade; o backend rejeita pedidos
-  de áudio antes de capturar/publicar. As combinações com áudio só são simuladas
-  no demo. Veja [media.md](media.md).
+## Limites da evidência
 
-As evidências gráficas e traces ficam no caminho `/tmp/subdisc-demo-check-*`
-impresso pelo script, fora do repositório. São somente dados sintéticos.
+- Containers não executados: socket Docker Desktop ausente e acesso ao socket
+  do daemon alternativo negado. `compose config --quiet` passou.
+- Sem build/execução Windows, portal Wayland, dispositivos físicos, hotplug,
+  avaliação acústica de AEC/AGC ou medição perceptiva de qualidade.
+- Sem NAT/TURN externo, perda real de pacotes controlada ou benchmark de carga
+  com 20 participantes. Dois minutos não equivalem a testes de horas/dias.
+- A adaptação simulcast foi validada por tamanho e visibilidade. A redução por
+  perda/jitter/RTT tem testes unitários, mas não houve perda de pacotes injetada
+  na rede. O desktop recebe sempre a camada mais alta.
+- Captura X11 exige layout de pixels de 32 bits (comum em desktops depth 24/32).
+  Capturas de SOs/fontes diferentes precisam da validação correspondente.
+
+Os traces E2E ficam em `../sub-disc/frontend/test-results` quando há falha.
+A auditoria gráfica bem-sucedida gerou `/tmp/subdisc-demo-check-203ugxj1`.
+Resultados do servidor e comandos completos: [testes do servidor](../../sub-disc/docs/testing.md).
