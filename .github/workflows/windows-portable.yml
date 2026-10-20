@@ -161,7 +161,9 @@ jobs:
       - name: Rust tests against the installed SDK (development mode)
         shell: powershell
         run: |
-          $root = $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
+          . ./scripts/windows/common.ps1
+          # Same discovery as the build (GITHUB_ENV value or the default install paths).
+          $root = Find-GStreamer $env:GSTREAMER_1_0_ROOT_MSVC_X86_64
           $env:PATH = "$root\bin;$env:PATH"
           $env:PKG_CONFIG = "$root\bin\pkg-config.exe"
           $env:PKG_CONFIG_PATH = "$root\lib\pkgconfig"

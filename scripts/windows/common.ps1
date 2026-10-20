@@ -183,6 +183,11 @@ function Invoke-Isolated {
         }
         if ($inner -is [ComponentModel.Win32Exception] -and $inner.Message -like 'CreateProcess failed*') {
             if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw "Program not found: $FilePath" }
+            # Not found, access denied, invalid/blocked image: the program itself
+            # cannot start, a pipe-based start would fail the same way.
+            if ($inner.NativeErrorCode -in 2, 3, 5, 32, 193, 216, 225, 1260) {
+                throw "Cannot start ${FilePath}: $($inner.Message) (Win32 error $($inner.NativeErrorCode))"
+            }
             # Safety net for the native runner itself; the pipe-based runner
             # yields the same exit code, only with pipes for the output.
             Write-Warning "Native runner could not start $FilePath ($($inner.Message)); using pipes instead."

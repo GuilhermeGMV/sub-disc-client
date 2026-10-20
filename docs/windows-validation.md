@@ -39,6 +39,7 @@ unificado, que reporta a versão `1.28.8.1`/“GIT”) e no GitHub Actions
 | ZIP com nome acentuado no 5.1 | .NET Framework só marca UTF-8 com `[Text.Encoding]::UTF8` | Idem, e leitura explícita em UTF-8 |
 | Variável “removida” ficava vazia no PowerShell 7.5+ | `$null` vira `''`; desde o .NET 9, `''` cria variável vazia | `[NullString]::Value` |
 | “913 present, 2 inventoried” | `ConvertFrom-Json` do 5.1 não enumera arrays JSON | `Read-JsonArray` |
+| “Access is denied” ao iniciar o cliente na pasta sem escrita (CI) | A permissão `W` do `icacls` inclui `SYNCHRONIZE`/`READ_CONTROL`; negá-la impede executar o EXE | Negar só `WD,AD,WEA,WA,D,DC` |
 | Scanner do pacote não usado (Windows e CI) | Bug do GStreamer: caminho do EXE via `GetModuleFileNameA`; com acentos (“ü”, “ç”) o comando do scanner não é montado e o escaneamento ocorre no processo | Manifesto `activeCodePage` UTF-8 embutido pelo `build.rs`; teste exige o manifesto e prova o uso do scanner pelo log do próprio processo do scanner |
 
 Essa última causa foi reproduzida com os binários oficiais 1.26.10 sob Wine,

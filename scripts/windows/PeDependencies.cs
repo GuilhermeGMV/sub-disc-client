@@ -173,7 +173,10 @@ public static class SubdiscProcess {
                 if (!CreateProcessW(fileName, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                         CreateSuspended | CreateUnicodeEnvironment | CreateNoWindow, environmentBlock,
                         workingDirectory, ref startup, out info))
-                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcess failed: " + fileName);
+                {
+                    int error = Marshal.GetLastWin32Error();
+                    throw new Win32Exception(error, "CreateProcess failed (" + new Win32Exception(error).Message + "): " + fileName);
+                }
             } finally {
                 Marshal.FreeHGlobal(environmentBlock);
             }
