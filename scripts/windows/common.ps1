@@ -149,6 +149,15 @@ function Invoke-Native {
     return $result
 }
 
+# First exception of type $Type in the chain (PowerShell wraps .NET exceptions in
+# MethodInvocationException; .NET may wrap e.g. an IOException inside).
+function Find-InnerException($Exception, [type]$Type) {
+    for ($current = $Exception; $current; $current = $current.InnerException) {
+        if ($current -is $Type) { return $current }
+    }
+    return $null
+}
+
 # Runs a program with stdout+stderr in $LogPath instead of a pipe (see
 # SubdiscProcess) and a timeout that ends its whole process tree. The child gets
 # this process's environment with $Environment applied ($null removes a name).
@@ -174,14 +183,14 @@ function Invoke-Isolated {
     try {
         $code = [SubdiscProcess]::Run($FilePath, $argumentString, $WorkingDirectory, $block, $LogPath, $TimeoutSeconds * 1000, [ref]$processId)
     } catch {
-        $inner = $_.Exception
-        while ($inner.InnerException) { $inner = $inner.InnerException }
         $output = Read-SharedText $LogPath
-        if ($inner -is [TimeoutException]) {
+        $timeout = Find-InnerException $_.Exception ([TimeoutException])
+        if ($timeout) {
             if ($output.Length -gt 4000) { $output = $output.Substring($output.Length - 4000) }
-            throw "$($inner.Message)`nOutput before the timeout: $(if ($output) { $output } else { '(none)' })"
+            throw "$($timeout.Message)`nOutput before the timeout: $(if ($output) { $output } else { '(none)' })"
         }
-        if ($inner -is [ComponentModel.Win32Exception] -and $inner.Message -like 'CreateProcess failed*') {
+        $inner = Find-InnerException $_.Exception ([ComponentModel.Win32Exception])
+        if ($inner -and $inner.Message -like 'CreateProcess failed*') {
             if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw "Program not found: $FilePath" }
             # Not found, access denied, invalid/blocked image: the program itself
             # cannot start, a pipe-based start would fail the same way.

@@ -237,11 +237,23 @@ try {
 
     $moved = Join-Path $work "moved folder $unicode"
     Move-Item -LiteralPath $first -Destination $moved
-    # Deny writes to the application folder (inherited by its files).
-    # Specific rights only: icacls 'W' also contains SYNCHRONIZE and READ_CONTROL,
-    # and denying SYNCHRONIZE makes the executable impossible to start.
-    $null = Invoke-Native "$env:SystemRoot\System32\icacls.exe" @($moved, '/deny', "*${sid}:(OI)(CI)(WD,AD,WEA,WA,D,DC)") -TimeoutSeconds 60
+    # Deny writes to the application folder (inherited by its files). Specific
+    # rights only (DE, not the simple right D; not W): those simple rights include
+    # SYNCHRONIZE, and denying it makes the executable impossible to start.
+    $null = Invoke-Native "$env:SystemRoot\System32\icacls.exe" @($moved, '/deny', "*${sid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)") -TimeoutSeconds 60
     $denied = $moved
+    # The folder must really be read-only for this process (elevated or not),
+    # otherwise the check below would prove nothing.
+    $probe = Join-Path $moved 'write-probe.tmp'
+    $writable = $true
+    try { [IO.File]::WriteAllText($probe, 'x') } catch {
+        if (-not (Find-InnerException $_.Exception ([UnauthorizedAccessException]))) { throw }
+        $writable = $false
+    }
+    if ($writable) {
+        Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue
+        throw 'The write-denied test folder is still writable for this process.'
+    }
     $relocated = Invoke-Check $moved 'moved-read-only' (Get-ChildEnvironment)
     if ($relocated.registry -eq $fresh.registry) { throw 'Moving the bundle reused the old registry.' }
     $checks.Add('relocation to a new path with spaces and Unicode, fresh registry, unrelated working directory, write-denied application folder')
