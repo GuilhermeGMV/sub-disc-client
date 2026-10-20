@@ -98,6 +98,7 @@ pub fn configure() -> Result<(), String> {
         std::env::set_var("GST_REGISTRY_1_0", registry);
         std::env::set_var("GST_REGISTRY_UPDATE", "yes");
         std::env::set_var("GST_REGISTRY_FORK", "yes");
+        // No GIO modules are shipped; this only keeps global ones from loading.
         std::env::set_var("GIO_MODULE_DIR", root.join("lib/gio/modules"));
         std::env::set_var("OPENSSL_MODULES", root.join("lib/ossl-modules"));
         std::env::set_var("OPENSSL_CONF", root.join("share/openssl/openssl.cnf"));

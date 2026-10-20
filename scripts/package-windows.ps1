@@ -63,18 +63,16 @@ try {
     foreach ($plugin in $spec.plugins) {
         Copy-RuntimeFile (Join-Path $GStreamerRoot "lib/gstreamer-1.0/gst$($plugin.name).dll") "lib/gstreamer-1.0/gst$($plugin.name).dll" 'gstreamer'
     }
-    # Loaded with LoadLibrary at runtime, so PE imports alone cannot find them.
-    # Keep their layout and scan their imports too; never copy SDK files.
-    # GIO: only the TLS backend (GTlsConnection, e.g. for libnice TURN over TLS).
-    # Proxy-resolver modules (giolibproxy -> libproxy -> pxbackend) are unused:
-    # HTTP/WebSocket are Rust code and libnice has its own proxy settings.
-    $modules = [ordered]@{ 'lib/gio/modules' = '^(lib)?gio(openssl|gnutls)\.dll$'; 'lib/ossl-modules' = '\.dll$' }
-    foreach ($module in $modules.GetEnumerator()) {
-        $source = Join-Path $GStreamerRoot $module.Key
-        if (Test-Path -LiteralPath $source) {
-            foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File | Where-Object Name -Match $module.Value) {
-                Copy-RuntimeFile $file.FullName "$($module.Key)/$($file.Name)" 'gstreamer'
-            }
+    # OpenSSL providers are loaded with LoadLibrary at runtime, so PE imports
+    # alone cannot find them: keep their layout and scan their imports too.
+    # No GIO modules: nothing in the client uses GIO TLS or proxy resolution
+    # (libnice 0.1.22 has no GTlsConnection use, DTLS uses OpenSSL directly,
+    # HTTP/WebSocket are Rust code). GIO_MODULE_DIR points into the bundle, so
+    # global modules are never loaded either.
+    $source = Join-Path $GStreamerRoot 'lib/ossl-modules'
+    if (Test-Path -LiteralPath $source) {
+        foreach ($file in Get-ChildItem -LiteralPath $source -Filter '*.dll' -File) {
+            Copy-RuntimeFile $file.FullName "lib/ossl-modules/$($file.Name)" 'gstreamer'
         }
     }
     Copy-RuntimeFile (Join-Path $GStreamerRoot 'etc/ssl/certs/ca-certificates.crt') 'etc/ssl/certs/ca-certificates.crt' 'gstreamer'
