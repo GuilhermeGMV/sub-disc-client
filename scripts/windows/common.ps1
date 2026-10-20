@@ -245,31 +245,39 @@ function Find-GStreamer([string]$Root) {
 # loads; both must report the same version or the headers/libs do not match.
 function Get-GStreamerVersion([string]$Root) {
     $pkgConfig = Join-Path $Root 'bin\pkg-config.exe'
-    # Private throwaway registry and no plugin scan: the developer's cache is untouched.
-    $registry = Join-Path ([IO.Path]::GetTempPath()) ('subdisc-gst-version-' + [guid]::NewGuid().ToString('N') + '.bin')
+    # Throwaway registry and an empty plugin directory: no plugin scan, and the
+    # developer's cache is untouched.
+    $scratch = Join-Path ([IO.Path]::GetTempPath()) ('subdisc-gst-version-' + [guid]::NewGuid().ToString('N'))
+    $null = New-Item -ItemType Directory -Force -Path (Join-Path $scratch 'no-plugins')
     $environment = @{ PKG_CONFIG_PATH = (Join-Path $Root 'lib\pkgconfig'); PKG_CONFIG_LIBDIR = (Join-Path $Root 'lib\pkgconfig')
-        PATH = "$Root\bin;$env:SystemRoot\System32"; GST_REGISTRY_1_0 = $registry; GST_PLUGIN_SYSTEM_PATH_1_0 = ''
-        GST_PLUGIN_PATH_1_0 = $null; GST_PLUGIN_PATH = $null; GST_PLUGIN_SYSTEM_PATH = $null }
-    $version = (Invoke-Native $pkgConfig @('--modversion','gstreamer-1.0') -Environment $environment -TimeoutSeconds 60).Output.Trim()
-    # major.minor.micro[.nano]: nano 1 = development (GIT) build, >= 2 = prerelease.
-    if ($version -notmatch '^1\.[0-9]+\.[0-9]+(\.[0-9]+)?$' -or [version]$version -lt [version]'1.22') { throw "GStreamer >= 1.22 required (Development reports '$version')." }
-    $parts = $version.Split('.')
-    $release = $parts[0..2] -join '.'
-    if ($parts.Count -eq 4 -and $parts[3] -ne '0') {
-        Write-Warning "GStreamer $version is a development/prerelease build (nano $($parts[3])). Prefer an official release SDK for distribution: the generated source references point to the $release tag."
-    }
-    foreach ($module in 'gstreamer-base-1.0','gstreamer-app-1.0','gstreamer-video-1.0','gstreamer-webrtc-1.0','gstreamer-sdp-1.0') {
-        $other = (Invoke-Native $pkgConfig @('--modversion',$module) -Environment $environment -TimeoutSeconds 60).Output.Trim()
-        if ($other -ne $version) { throw "Mismatched GStreamer Development modules: $module $other vs gstreamer-1.0 $version" }
-    }
+        PATH = "$Root\bin;$env:SystemRoot\System32"; GST_REGISTRY_1_0 = (Join-Path $scratch 'registry.bin')
+        GST_PLUGIN_SYSTEM_PATH_1_0 = (Join-Path $scratch 'no-plugins')
+        GST_PLUGIN_PATH_1_0 = $null; GST_PLUGIN_PATH = $null; GST_PLUGIN_SYSTEM_PATH = $null; GST_DEBUG = $null }
     try {
-        $inspect = Invoke-Native (Join-Path $Root 'bin\gst-inspect-1.0.exe') @('--version') -Environment $environment -TimeoutSeconds 120
-    } finally { Remove-Item -LiteralPath $registry -Force -ErrorAction SilentlyContinue }
-    # gst-inspect prints its own package version (with nano) and the core
-    # library's version string ("GStreamer 1.28.8", "... (GIT)", "... (prerelease)").
-    if ($inspect.Output -notmatch "(?m)version $([regex]::Escape($version))\s*$" -or
-        $inspect.Output -notmatch "(?m)^GStreamer $([regex]::Escape($release))( \((GIT|prerelease)\))?\s*$") {
-        throw "GStreamer Runtime and Development versions differ: Development $version, Runtime: $($inspect.Output.Trim())"
+        $version = (Invoke-Native $pkgConfig @('--modversion','gstreamer-1.0') -Environment $environment -TimeoutSeconds 60).Output.Trim()
+        # major.minor.micro[.nano]: nano 1 = development (GIT) build, >= 2 = prerelease.
+        if ($version -notmatch '^1\.[0-9]+\.[0-9]+(\.[0-9]+)?$' -or [version]$version -lt [version]'1.22') { throw "GStreamer >= 1.22 required (Development reports '$version')." }
+        $parts = $version.Split('.')
+        $release = $parts[0..2] -join '.'
+        if ($parts.Count -eq 4 -and $parts[3] -ne '0') {
+            Write-Warning "GStreamer $version is a development/prerelease build (nano $($parts[3])). Prefer an official release SDK for distribution: the generated source references point to the $release tag."
+        }
+        foreach ($module in 'gstreamer-base-1.0','gstreamer-app-1.0','gstreamer-video-1.0','gstreamer-webrtc-1.0','gstreamer-sdp-1.0') {
+            $other = (Invoke-Native $pkgConfig @('--modversion',$module) -Environment $environment -TimeoutSeconds 60).Output.Trim()
+            if ($other -ne $version) { throw "Mismatched GStreamer Development modules: $module $other vs gstreamer-1.0 $version" }
+        }
+        # gst-inspect 1.28.8 was seen hanging with its output on a pipe while it
+        # finished at once on a console, so its output goes to a file instead.
+        $inspect = Join-Path $Root 'bin\gst-inspect-1.0.exe'
+        $output = Join-Path $scratch 'version.txt'
+        $null = Invoke-Native $env:ComSpec -RawArguments "/d /s /c `"`"$inspect`" --version > `"$output`" 2>&1`"" -Environment $environment -TimeoutSeconds 120
+        $text = [IO.File]::ReadAllText($output)
+    } finally { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+    # gst-inspect prints the tools' major.minor.micro and the core library's
+    # version string ("GStreamer 1.28.8", "... (GIT)", "... (prerelease)").
+    if ($text -notmatch "(?m)version $([regex]::Escape($release))(\.[0-9]+)?\s*$" -or
+        $text -notmatch "(?m)^GStreamer $([regex]::Escape($release))( \((GIT|prerelease)\))?\s*$") {
+        throw "GStreamer Runtime and Development versions differ: Development $version, Runtime: $($text.Trim())"
     }
     return $version
 }

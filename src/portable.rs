@@ -91,9 +91,9 @@ pub fn configure() -> Result<(), String> {
         ] {
             std::env::remove_var(key);
         }
-        std::env::set_var("GST_PLUGIN_PATH_1_0", root.join(PLUGIN_DIR));
-        // Empty disables the compiled-in/global plugin directories.
-        std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", "");
+        // The bundle directory *is* the system plugin path: this replaces the
+        // compiled-in/global directories without relying on an empty value.
+        std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", root.join(PLUGIN_DIR));
         std::env::set_var("GST_PLUGIN_SCANNER_1_0", root.join(SCANNER));
         std::env::set_var("GST_REGISTRY_1_0", registry);
         std::env::set_var("GST_REGISTRY_UPDATE", "yes");

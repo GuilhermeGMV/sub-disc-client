@@ -50,6 +50,9 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          # The Windows PowerShell 5.1 progress bar makes large downloads very slow.
+          $ProgressPreference = 'SilentlyContinue'
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
           $version = $env:GSTREAMER_VERSION
           $base = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc"
           # SHA-256 of the official installers of GSTREAMER_VERSION; update both together.
@@ -58,17 +61,47 @@ jobs:
             "gstreamer-1.0-devel-msvc-x86_64-$version.msi" = '8487a115fea3b0b0b4c55a9a413ad1adab0fe78f6681feedc60858a48613a121'
           }
           $cache = Join-Path $env:RUNNER_TEMP 'gstreamer-msi'
-          $null = New-Item -ItemType Directory -Force -Path $cache
+          $logs = Join-Path $env:RUNNER_TEMP 'gstreamer-logs'
+          $null = New-Item -ItemType Directory -Force -Path $cache, $logs
           foreach ($entry in $files.GetEnumerator()) {
             $msi = Join-Path $cache $entry.Key
-            if (-not (Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) {
-              Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi
+            for ($attempt = 1; -not (Test-Path $msi) -or (Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value; $attempt++) {
+              if ($attempt -gt 3) { throw "Download/checksum failed 3 times: $base/$($entry.Key)" }
+              Write-Host "Downloading $($entry.Key) (attempt $attempt)"
+              try { Invoke-WebRequest -UseBasicParsing "$base/$($entry.Key)" -OutFile $msi } catch { Write-Warning $_.Exception.Message; Start-Sleep 15 }
             }
-            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $entry.Value) { throw "GStreamer checksum mismatch: $($entry.Key)" }
-            $p = Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /qn /norestart INSTALLDIR=C:\gstreamer ADDLOCAL=ALL" -PassThru -Wait
-            if ($p.ExitCode -notin 0,3010) { throw "MSI failed: $($p.ExitCode)" }
+            $log = Join-Path $logs "$($entry.Key).log"
+            for ($attempt = 1; ; $attempt++) {
+              Write-Host "Installing $($entry.Key) (attempt $attempt)"
+              $p = [Diagnostics.Process]::Start('msiexec.exe', "/i `"$msi`" /qn /norestart /l*v `"$log`" INSTALLDIR=C:\gstreamer ADDLOCAL=ALL")
+              $p.WaitForExit()
+              $code = $p.ExitCode
+              # 1618: another installation (e.g. on runner start-up) is in progress.
+              if ($code -ne 1618 -or $attempt -ge 10) { break }
+              Start-Sleep 30
+            }
+            if ($code -notin 0, 3010) {
+              if (Test-Path $log) { Get-Content $log -Tail 80 | Write-Host }
+              throw "msiexec failed for $($entry.Key) with exit code $code (full log: artifact gstreamer-install-logs)."
+            }
           }
-          'GSTREAMER_1_0_ROOT_MSVC_X86_64=C:\gstreamer\1.0\msvc_x86_64' >> $env:GITHUB_ENV
+          # INSTALLDIR is the C:\gstreamer root; the MSI appends 1.0\msvc_x86_64.
+          $root = @('C:\gstreamer\1.0\msvc_x86_64', "$env:ProgramFiles\gstreamer\1.0\msvc_x86_64") |
+            Where-Object { Test-Path (Join-Path $_ 'bin\gstreamer-1.0-0.dll') } | Select-Object -First 1
+          if (-not $root) {
+            Get-ChildItem 'C:\gstreamer', "$env:ProgramFiles\gstreamer" -Recurse -Depth 3 -Filter 'gstreamer-1.0-0.dll' -ErrorAction SilentlyContinue | ForEach-Object FullName
+            throw 'GStreamer was installed, but bin\gstreamer-1.0-0.dll was not found in the expected locations.'
+          }
+          Write-Host "GStreamer root: $root"
+          # Windows PowerShell 5.1 '>>' writes UTF-16; GITHUB_ENV must be UTF-8.
+          "GSTREAMER_1_0_ROOT_MSVC_X86_64=$root" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: GStreamer installer logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gstreamer-install-logs
+          path: ${{ runner.temp }}/gstreamer-logs
+          if-no-files-found: ignore
       - name: Rust MSVC
         id: rust
         shell: powershell
@@ -81,7 +114,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'rustup target failed' }
           $release = rustc -V
           if ($LASTEXITCODE) { throw 'rustc failed' }
-          "version=$($release -replace '[^0-9A-Za-z.]+','-')" >> $env:GITHUB_OUTPUT
+          "version=$($release -replace '[^0-9A-Za-z.]+','-')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
       - name: Cache Cargo downloads and build output
         uses: actions/cache@v4
         with:

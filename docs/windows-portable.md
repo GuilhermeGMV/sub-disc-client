@@ -124,9 +124,10 @@ Tokio, interface e de qualquer `gst::init` (há chamadas em `rtc.rs`,
   arquivo ausente e manda reextrair o ZIP. Hashes não são impostos (LGPL).
 - `SetDefaultDllDirectories(APPLICATION_DIR | SYSTEM32)` restringe os
   carregamentos posteriores; não se acrescentam cwd ou PATH.
-- `GST_PLUGIN_PATH_1_0` = `lib/gstreamer-1.0` local; `GST_PLUGIN_SYSTEM_PATH_1_0`
-  vazio desativa os caminhos globais (conforme a
+- `GST_PLUGIN_SYSTEM_PATH_1_0` = `lib/gstreamer-1.0` local, o que substitui os
+  caminhos globais compilados no GStreamer (ver a
   [documentação](https://gstreamer.freedesktop.org/documentation/gstreamer/running.html));
+  `GST_PLUGIN_PATH_1_0` fica removido. Não se depende de variável vazia;
   `GST_PLUGIN_SCANNER_1_0` = scanner local; `GST_REGISTRY_1_0` =
   `%LOCALAPPDATA%\Subdisc\cache\gstreamer\registry-<hash>.bin`. Variáveis
   herdadas que alteram descoberta, cache, scanner, prioridade ou TLS do GIO são
