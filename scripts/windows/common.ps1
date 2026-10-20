@@ -293,7 +293,9 @@ function New-PortableZip([string]$Source, [string]$Destination) {
     $base = Split-Path -Leaf $Source
     $stream = [IO.File]::Open($Destination, [IO.FileMode]::CreateNew)
     try {
-        $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create, $false, (New-Object Text.UTF8Encoding $false))
+        # Exactly [Text.Encoding]::UTF8: .NET Framework (PowerShell 5.1) only sets
+        # the ZIP UTF-8 name flag for that instance, not for new UTF8Encoding().
+        $zip = New-Object IO.Compression.ZipArchive($stream, [IO.Compression.ZipArchiveMode]::Create, $false, [Text.Encoding]::UTF8)
         try {
             foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File | Sort-Object { Get-RelativePath $Source $_.FullName }) {
                 $entry = $zip.CreateEntry("$base/" + (Get-RelativePath $Source $file.FullName), [IO.Compression.CompressionLevel]::Optimal)
@@ -306,7 +308,8 @@ function New-PortableZip([string]$Source, [string]$Destination) {
     } finally { $stream.Dispose() }
 }
 function Expand-PortableZip([string]$Zip, [string]$Destination) {
-    $archive = [IO.Compression.ZipFile]::OpenRead($Zip)
+    # Names are UTF-8 (flagged); never fall back to the ANSI/OEM code page.
+    $archive = [IO.Compression.ZipFile]::Open($Zip, [IO.Compression.ZipArchiveMode]::Read, [Text.Encoding]::UTF8)
     try {
         foreach ($entry in $archive.Entries) {
             if ($entry.FullName -notmatch '^Subdisc-portable/' -or $entry.FullName -match '(^|/)\.\.(/|$)|\\|^/|:') {
@@ -314,5 +317,5 @@ function Expand-PortableZip([string]$Zip, [string]$Destination) {
             }
         }
     } finally { $archive.Dispose() }
-    [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Destination)
+    [IO.Compression.ZipFile]::ExtractToDirectory($Zip, $Destination, [Text.Encoding]::UTF8)
 }
