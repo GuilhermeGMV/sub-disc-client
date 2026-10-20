@@ -3,11 +3,17 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 if (-not ('SubdiscPe' -as [type])) {
     Add-Type -Path (Join-Path $PSScriptRoot 'PeDependencies.cs')
-} elseif (-not ('SubdiscErrorMode' -as [type]) -or -not [SubdiscPe].GetMethod('LinkerVersion')) {
+} elseif (-not ('SubdiscErrorMode' -as [type]) -or -not ('SubdiscProcess' -as [type]) -or -not [SubdiscPe].GetMethod('LinkerVersion')) {
     throw 'An older SubdiscPe type is loaded in this session. Start a new PowerShell process.'
 }
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
+if ($PSVersionTable.PSEdition -ne 'Core') {
+    # Windows PowerShell 5.1 gives every array an ETS 'Count' alias, and its
+    # ConvertTo-Json then writes a PSObject-wrapped array as {"value":[..],"Count":n}
+    # instead of [..]. The intrinsic .Count keeps working without this type data.
+    Remove-TypeData -TypeName System.Array -ErrorAction SilentlyContinue
+}
 
 $script:ArtifactNames = @('Subdisc-portable', 'Subdisc-Windows-x64-portable.zip', 'portable-validation.json')
 
@@ -22,8 +28,24 @@ function Assert-File([string]$Path) {
 function Write-Utf8([string]$Path, [string]$Text) {
     [IO.File]::WriteAllText($Path, $Text, (New-Object Text.UTF8Encoding $false))
 }
+# Reads a log that another process may still hold open for writing.
+function Read-SharedText([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
+    $stream = New-Object IO.FileStream($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    try {
+        $reader = New-Object IO.StreamReader($stream, (New-Object Text.UTF8Encoding $false), $true)
+        try { return $reader.ReadToEnd().Trim() } finally { $reader.Dispose() }
+    } finally { $stream.Dispose() }
+}
 function Read-Json([string]$Path) {
     Get-Content -LiteralPath $Path -Raw -Encoding UTF8 | ConvertFrom-Json
+}
+# Windows PowerShell 5.1's ConvertFrom-Json emits a JSON array as ONE object
+# (so @(...) around it has a single element); PowerShell 7 enumerates it.
+# Returns a real array in both, including for [] and one-element arrays.
+function Read-JsonArray([string]$Path) {
+    $value = Read-Json $Path
+    return ,@(foreach ($item in $value) { $item })
 }
 function Get-RelativePath([string]$Root, [string]$Path) {
     $prefix = [IO.Path]::GetFullPath($Root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
@@ -46,7 +68,10 @@ function Save-ProcessEnvironment {
 function Restore-ProcessEnvironment($Saved) {
     foreach ($key in @([Environment]::GetEnvironmentVariables('Process').Keys)) {
         if (-not ([string]$key).StartsWith('=') -and -not $Saved.ContainsKey([string]$key)) {
-            [Environment]::SetEnvironmentVariable([string]$key, $null, 'Process')
+            # [NullString]::Value: PowerShell turns $null into '' for .NET string
+            # parameters, and since .NET 9 (PowerShell 7.5+) '' creates an empty
+            # variable instead of deleting it.
+            [Environment]::SetEnvironmentVariable([string]$key, [NullString]::Value, 'Process')
         }
     }
     foreach ($entry in $Saved.GetEnumerator()) {
@@ -122,6 +147,51 @@ function Invoke-Native {
         throw ("{0} exited with {1} (0x{2:X8}): {3}`n{4}" -f $FilePath, $result.ExitCode, $result.ExitCode, $start.Arguments, $detail)
     }
     return $result
+}
+
+# Runs a program with stdout+stderr in $LogPath instead of a pipe (see
+# SubdiscProcess) and a timeout that ends its whole process tree. The child gets
+# this process's environment with $Environment applied ($null removes a name).
+# Never throws for a non-zero exit code: callers check ExitCode themselves.
+function Invoke-Isolated {
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [Parameter(Mandatory)][string]$WorkingDirectory,
+        [Parameter(Mandatory)][string]$LogPath,
+        [hashtable]$Environment = @{},
+        [int]$TimeoutSeconds = 120
+    )
+    $block = @{}
+    foreach ($entry in [Environment]::GetEnvironmentVariables('Process').GetEnumerator()) {
+        if (-not ([string]$entry.Key).StartsWith('=')) { $block[[string]$entry.Key] = [string]$entry.Value }
+    }
+    foreach ($entry in $Environment.GetEnumerator()) {
+        if ($null -eq $entry.Value) { $block.Remove($entry.Key) } else { $block[$entry.Key] = [string]$entry.Value }
+    }
+    $argumentString = ConvertTo-ArgumentString $Arguments
+    try {
+        $code = [SubdiscProcess]::Run($FilePath, $argumentString, $WorkingDirectory, $block, $LogPath, $TimeoutSeconds * 1000)
+    } catch {
+        $inner = $_.Exception
+        while ($inner.InnerException) { $inner = $inner.InnerException }
+        $output = Read-SharedText $LogPath
+        if ($inner -is [TimeoutException]) {
+            if ($output.Length -gt 4000) { $output = $output.Substring($output.Length - 4000) }
+            throw "$($inner.Message)`nOutput before the timeout: $(if ($output) { $output } else { '(none)' })"
+        }
+        if ($inner -is [ComponentModel.Win32Exception] -and $inner.Message -like 'CreateProcess failed*') {
+            if (-not (Test-Path -LiteralPath $FilePath -PathType Leaf)) { throw "Program not found: $FilePath" }
+            # Safety net for the native runner itself; the pipe-based runner
+            # yields the same exit code, only with pipes for the output.
+            Write-Warning "Native runner could not start $FilePath ($($inner.Message)); using pipes instead."
+            $result = Invoke-Native $FilePath $Arguments -WorkingDirectory $WorkingDirectory -Environment $Environment -TimeoutSeconds $TimeoutSeconds -IgnoreExitCode
+            Write-Utf8 $LogPath (($result.Error + "`n" + $result.Output).Trim())
+            return [pscustomobject]@{ ExitCode = $result.ExitCode; Output = (($result.Error + "`n" + $result.Output).Trim()) }
+        }
+        throw
+    }
+    return [pscustomobject]@{ ExitCode = $code; Output = (Read-SharedText $LogPath) }
 }
 
 function Test-SystemDll([string]$Name) {
@@ -309,7 +379,11 @@ function New-PortableZip([string]$Source, [string]$Destination) {
         try {
             foreach ($file in Get-ChildItem -LiteralPath $Source -Recurse -File | Sort-Object { Get-RelativePath $Source $_.FullName }) {
                 $entry = $zip.CreateEntry("$base/" + (Get-RelativePath $Source $file.FullName), [IO.Compression.CompressionLevel]::Optimal)
-                $entry.LastWriteTime = New-Object DateTimeOffset($file.LastWriteTime)
+                # ZIP (DOS) timestamps cover 1980-2107; e.g. crate files may carry 1970.
+                $time = $file.LastWriteTime
+                if ($time.Year -lt 1980) { $time = New-Object DateTime(1980, 1, 2) }
+                if ($time.Year -gt 2107) { $time = New-Object DateTime(2107, 12, 30) }
+                $entry.LastWriteTime = New-Object DateTimeOffset($time)
                 $reader = [IO.File]::OpenRead($file.FullName)
                 $writer = $entry.Open()
                 try { $reader.CopyTo($writer) } finally { $writer.Dispose(); $reader.Dispose() }

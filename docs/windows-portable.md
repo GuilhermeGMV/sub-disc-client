@@ -166,7 +166,9 @@ powershell -ExecutionPolicy Bypass -File scripts\windows\test-packaging.ps1
 ```
 
 `test-portable-windows.ps1` grava `portable-validation.json` (sucesso ou falha)
-com cada verificação. Todos os processos-filho rodam com PATH só do Windows,
+com cada verificação. O cliente e o scanner rodam com a saída em arquivo (nunca
+em pipe: o `gst-inspect` 1.28.8 travou assim), dentro de um Job Object, de modo
+que um timeout encerra também o scanner. Todos os processos-filho rodam com PATH só do Windows,
 sem variáveis GStreamer/GIO/OpenSSL, com `LOCALAPPDATA`/`APPDATA` privados em
 caminho Unicode e com timeout. O ambiente, o modo de erro, as ACLs e os caches
 do chamador ficam intactos. Verifica:

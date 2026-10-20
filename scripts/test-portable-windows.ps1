@@ -40,7 +40,7 @@ function Assert-Inventory([string]$Root) {
         'vcruntime140.dll','share/openssl/openssl.cnf','README.txt','etc/ssl/certs/ca-certificates.crt') {
         Assert-File (Join-Path $Root $file)
     }
-    $inventory = @(Read-Json (Join-Path $Root 'files.json'))
+    $inventory = Read-JsonArray (Join-Path $Root 'files.json')
     $actual = @(Get-ChildItem -LiteralPath $Root -Recurse -File)
     if ($actual.Count -ne $inventory.Count + 1) { throw "Unexpected/missing files in the bundle: $($actual.Count) present, $($inventory.Count + 1) inventoried (a shipped registry or a write into the application folder?)." }
     $seen = @{}
@@ -101,10 +101,11 @@ function Get-ChildEnvironment([switch]$Hostile) {
     }
     return $environment
 }
-# Runs --portable-check and returns [exit code, parsed report or $null].
+# Runs --portable-check (output in $Name.log, not a pipe) and returns
+# [exit code, parsed report or $null].
 function Invoke-CheckRaw([string]$Root, [string]$Name, [hashtable]$Environment, [string[]]$Extra = @()) {
     $output = Join-Path $work "$Name.json"
-    $result = Invoke-Native (Join-Path $Root 'subdisc-client.exe') (@('--portable-check', $output) + $Extra) -WorkingDirectory $work -Environment $Environment -TimeoutSeconds $TimeoutSeconds -IgnoreExitCode
+    $result = Invoke-Isolated (Join-Path $Root 'subdisc-client.exe') (@('--portable-check', $output) + $Extra) -WorkingDirectory $work -LogPath (Join-Path $work "$Name.log") -Environment $Environment -TimeoutSeconds $TimeoutSeconds
     $report = if (Test-Path -LiteralPath $output) { Read-Json $output } else { $null }
     return @($result.ExitCode, $report)
 }
@@ -116,8 +117,9 @@ function Invoke-Check([string]$Root, [string]$Name, [hashtable]$Environment, [st
     if (-not $report.ok -or -not $report.portable -or $report.audio_buffers -le 0 -or $report.video_frames -le 0) {
         throw "Media/portable check '$Name' returned an unexpected report."
     }
-    $prefix = [IO.Path]::GetFullPath((Join-Path $Environment['LOCALAPPDATA'] 'Subdisc/cache/gstreamer')) + [IO.Path]::DirectorySeparatorChar
-    if (-not $report.registry.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Registry is outside the per-user cache: $($report.registry)" }
+    # Compare normalized paths: separators may be mixed in the reported one.
+    $prefix = [IO.Path]::GetFullPath((Join-Path $Environment['LOCALAPPDATA'] 'Subdisc\cache\gstreamer')).TrimEnd('\') + '\'
+    if (-not [IO.Path]::GetFullPath($report.registry).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Registry is outside the per-user cache: $($report.registry)" }
     Assert-File $report.registry
     foreach ($plugin in $report.plugins) {
         if ($plugin.file -notlike 'gst*.dll') { throw "Unexpected plugin file: $($plugin.file)" }
@@ -141,7 +143,9 @@ function New-TestCopy([string]$Name) {
     return $copy
 }
 function Remove-InventoryEntry([string]$Root, [string]$Relative) {
-    $inventory = @(Read-Json (Join-Path $Root 'files.json') | Where-Object { $_.path -ne $Relative })
+    $all = Read-JsonArray (Join-Path $Root 'files.json')
+    $inventory = @($all | Where-Object { $_.path -ne $Relative })
+    if ($inventory.Count -ne $all.Count - 1) { throw "Inventory entry not found: $Relative" }
     Write-Utf8 (Join-Path $Root 'files.json') (ConvertTo-Json -InputObject $inventory -Depth 4)
 }
 
@@ -152,7 +156,8 @@ try {
 
     # The scanner is a separate process: start it alone with a Windows-only PATH.
     # gst-plugin-scanner exits with 1 when run without the loader handshake.
-    $null = Invoke-Native (Join-Path $BundlePath 'gst-plugin-scanner.exe') @() -WorkingDirectory $work -Environment (Get-ChildEnvironment) -TimeoutSeconds 30 -AllowedExitCodes @(1)
+    $scanner = Invoke-Isolated (Join-Path $BundlePath 'gst-plugin-scanner.exe') @() -WorkingDirectory $work -LogPath (Join-Path $work 'scanner.log') -Environment (Get-ChildEnvironment) -TimeoutSeconds 30
+    if ($scanner.ExitCode -ne 1) { throw ("gst-plugin-scanner.exe exited with {0} (0x{0:X8}) instead of 1: {1}" -f $scanner.ExitCode, $scanner.Output) }
     $checks.Add('scanner: gst-plugin-scanner.exe starts from the bundle with a Windows-only PATH (exit 1, imports resolved)')
 
     $first = New-TestCopy 'first location'
@@ -166,7 +171,9 @@ try {
     $fresh = Invoke-Check $first 'fresh' $environment
     # GStreamer silently falls back to in-process scanning when the helper fails;
     # the debug log proves the bundled scanner process did the scan.
-    $log = (Get-ChildItem -LiteralPath $logs -File | ForEach-Object { [IO.File]::ReadAllText($_.FullName, [Text.Encoding]::UTF8) }) -join "`n"
+    # GST debug files (one per process) plus the client's stderr: the
+    # "External plugin loader failed" fallback is a g_warning, not a GST log.
+    $log = ((Get-ChildItem -LiteralPath $logs -File | ForEach-Object { Read-SharedText $_.FullName }) + (Read-SharedText (Join-Path $work 'fresh.log'))) -join "`n"
     $spawned = [regex]::Matches($log, 'Trying to spawn gst-plugin-scanner helper at (.+?), command') | ForEach-Object { $_.Groups[1].Value }
     if (-not $spawned -or @($spawned | Where-Object { -not $_.EndsWith('\first location\gst-plugin-scanner.exe', [StringComparison]::OrdinalIgnoreCase) }).Count) {
         throw "The bundled gst-plugin-scanner.exe was not the helper used for the fresh registry: $($spawned -join '; ')"
@@ -196,7 +203,8 @@ try {
         if ($results['capture'].capture_frames -le 0) { throw 'D3D11/WGC capture produced no frames.' }
         foreach ($mode in '--demo','--dev-ui') {
             $output = Join-Path $work ($mode.TrimStart('-') + '.json')
-            $null = Invoke-Native (Join-Path $moved 'subdisc-client.exe') @($mode, '--portable-ui-smoke', $output) -WorkingDirectory $work -Environment (Get-ChildEnvironment) -TimeoutSeconds $TimeoutSeconds
+            $ui = Invoke-Isolated (Join-Path $moved 'subdisc-client.exe') @($mode, '--portable-ui-smoke', $output) -WorkingDirectory $work -LogPath "$output.log" -Environment (Get-ChildEnvironment) -TimeoutSeconds $TimeoutSeconds
+            if ($ui.ExitCode -ne 0) { throw ("GUI check {0} exited with {1}: {2}" -f $mode, $ui.ExitCode, $ui.Output) }
             Assert-File $output
             $ui = Read-Json $output
             if (-not $ui.ok -or $ui.demo_frames -lt 10) { throw "GUI check failed: $mode" }

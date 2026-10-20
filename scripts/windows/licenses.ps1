@@ -1,5 +1,7 @@
 param([string]$Bundle, [string]$GStreamerRoot, [hashtable]$Origins)
 $ErrorActionPreference = 'Stop'
+# Windows PowerShell 5.1 downloads are very slow with the progress bar.
+$ProgressPreference = 'SilentlyContinue'
 $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $licenseRoot = Join-Path $GStreamerRoot 'share/licenses'
 if (-not (Test-Path -LiteralPath $licenseRoot -PathType Container)) { throw 'GStreamer share/licenses missing: install the complete official Runtime/Development.' }

@@ -2,6 +2,7 @@
 // Includes delay imports; rejects malformed tables and every non-AMD64 image.
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -87,4 +88,114 @@ public static class SubdiscErrorMode {
     [DllImport("kernel32.dll")]
     public static extern uint SetErrorMode(uint mode);
     public const uint Quiet = 0x0001 | 0x0002 | 0x8000;
+}
+
+// Runs a program with stdout/stderr in a file, never a pipe: GLib-based tools
+// (gst-inspect 1.28.8) were seen hanging with their output on a pipe. The
+// process starts suspended inside a job object, so a timeout also ends the
+// children it spawned (gst-plugin-scanner). C# 5 syntax for Windows PowerShell.
+public static class SubdiscProcess {
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct StartupInfo {
+        public int cb;
+        public string lpReserved;
+        public string lpDesktop;
+        public string lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation {
+        public IntPtr hProcess, hThread;
+        public int dwProcessId, dwThreadId;
+    }
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern bool CreateProcessW(string applicationName, StringBuilder commandLine, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint creationFlags, IntPtr environment, string currentDirectory,
+        ref StartupInfo startupInfo, out ProcessInformation processInformation);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetHandleInformation(IntPtr handle, uint mask, uint flags);
+    [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+    static extern IntPtr CreateJobObjectW(IntPtr attributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateJobObject(IntPtr job, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool TerminateProcess(IntPtr process, uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint ResumeThread(IntPtr thread);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern uint WaitForSingleObject(IntPtr handle, uint milliseconds);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetExitCodeProcess(IntPtr process, out uint exitCode);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    const uint CreateSuspended = 0x00000004, CreateUnicodeEnvironment = 0x00000400, CreateNoWindow = 0x08000000;
+    const int StartfUseStdHandles = 0x00000100;
+    const uint HandleFlagInherit = 0x00000001, WaitObject0 = 0, Infinite = 0xFFFFFFFF;
+
+    // Returns the exit code. Throws Win32Exception if the process cannot be
+    // started and TimeoutException (after ending the process tree) on timeout.
+    public static int Run(string fileName, string arguments, string workingDirectory,
+                          System.Collections.IDictionary environment, string logPath, int timeoutMilliseconds) {
+        var names = new List<string>();
+        foreach (System.Collections.DictionaryEntry entry in environment) {
+            string name = (string)entry.Key;
+            if (entry.Value == null || name.Length == 0 || name.IndexOf('=') >= 0 || name.IndexOf('\0') >= 0)
+                throw new ArgumentException("Invalid environment variable: " + name);
+            names.Add(name);
+        }
+        names.Sort(StringComparer.OrdinalIgnoreCase);
+        var block = new StringBuilder();
+        foreach (string name in names) block.Append(name).Append('=').Append((string)environment[name]).Append('\0');
+        block.Append('\0');
+        var commandLine = new StringBuilder("\"" + fileName + "\"" + (string.IsNullOrEmpty(arguments) ? "" : " " + arguments));
+        var info = new ProcessInformation();
+        IntPtr job = IntPtr.Zero;
+        using (var log = new FileStream(logPath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete)) {
+            IntPtr handle = log.SafeFileHandle.DangerousGetHandle();
+            if (!SetHandleInformation(handle, HandleFlagInherit, HandleFlagInherit))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "SetHandleInformation");
+            var startup = new StartupInfo();
+            startup.cb = Marshal.SizeOf(typeof(StartupInfo));
+            startup.dwFlags = StartfUseStdHandles;
+            startup.hStdInput = IntPtr.Zero;
+            startup.hStdOutput = handle;
+            startup.hStdError = handle;
+            IntPtr environmentBlock = Marshal.StringToHGlobalUni(block.ToString());
+            try {
+                if (!CreateProcessW(fileName, commandLine, IntPtr.Zero, IntPtr.Zero, true,
+                        CreateSuspended | CreateUnicodeEnvironment | CreateNoWindow, environmentBlock,
+                        workingDirectory, ref startup, out info))
+                    throw new Win32Exception(Marshal.GetLastWin32Error(), "CreateProcess failed: " + fileName);
+            } finally {
+                Marshal.FreeHGlobal(environmentBlock);
+            }
+        }
+        try {
+            job = CreateJobObjectW(IntPtr.Zero, null);
+            bool inJob = job != IntPtr.Zero && AssignProcessToJobObject(job, info.hProcess);
+            if (ResumeThread(info.hThread) == Infinite) {
+                int error = Marshal.GetLastWin32Error();
+                TerminateProcess(info.hProcess, 1);
+                throw new Win32Exception(error, "ResumeThread failed: " + fileName);
+            }
+            if (WaitForSingleObject(info.hProcess, (uint)timeoutMilliseconds) != WaitObject0) {
+                if (inJob) TerminateJobObject(job, 1); else TerminateProcess(info.hProcess, 1);
+                WaitForSingleObject(info.hProcess, 10000);
+                throw new TimeoutException("Timed out after " + (timeoutMilliseconds / 1000) + "s: " + fileName + " " + arguments);
+            }
+            uint exitCode;
+            if (!GetExitCodeProcess(info.hProcess, out exitCode))
+                throw new Win32Exception(Marshal.GetLastWin32Error(), "GetExitCodeProcess");
+            return unchecked((int)exitCode);
+        } finally {
+            if (info.hThread != IntPtr.Zero) CloseHandle(info.hThread);
+            if (info.hProcess != IntPtr.Zero) CloseHandle(info.hProcess);
+            if (job != IntPtr.Zero) CloseHandle(job);
+        }
+    }
 }

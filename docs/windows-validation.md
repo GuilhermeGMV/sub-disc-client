@@ -22,6 +22,34 @@ Os testes dos scripts encontraram e permitiram corrigir um defeito real: um
 parâmetro `[string]` com padrão `$null` vira `''` no PowerShell, o que fazia
 `Invoke-Native` descartar todos os argumentos.
 
+## Execuções reais em Windows (máquina do desenvolvedor e GitHub Actions)
+
+O build foi executado em Windows 11 com GStreamer 1.28.8 (instalador oficial
+unificado, que reporta a versão `1.28.8.1`/“GIT”) e no GitHub Actions
+(`windows-2022`, SDK 1.26.10). Cada execução revelou um problema, corrigido:
+
+| Sintoma | Causa | Correção |
+|---|---|---|
+| Versão `1.28.8.1` recusada | Versões com 4 partes (nano) | Aceitas, com aviso; tags usam `1.28.8` |
+| `gst-inspect --version` sem terminar | Travou com a saída em pipe; com console ou arquivo termina | Saída em arquivo (`cmd /c ... > arquivo`) |
+| `pxbackend-1.0.dll` não resolvida | Módulo `giolibproxy` do GIO (1.28) | Nenhum módulo GIO é empacotado (não usados) |
+| Licenças de `glib-networking` ausentes | Consequência do item anterior | Idem |
+| 404 em `AUTHORS` do gst-plugins-good | Removido no upstream 1.28 | `AUTHORS` opcional; `COPYING` obrigatório |
+| Hash do MSI no CI | Download corrompido no runner | `curl.exe` com novas tentativas e conferência |
+| ZIP com nome acentuado no 5.1 | .NET Framework só marca UTF-8 com `[Text.Encoding]::UTF8` | Idem, e leitura explícita em UTF-8 |
+| Variável “removida” ficava vazia no PowerShell 7.5+ | `$null` vira `''`; desde o .NET 9, `''` cria variável vazia | `[NullString]::Value` |
+| “913 present, 2 inventoried” | `ConvertFrom-Json` do 5.1 não enumera arrays JSON | `Read-JsonArray` |
+
+## Verificações adicionais sem Windows (ensaio com o SDK real)
+
+| Verificação | Resultado |
+|---|---|
+| Testes dos scripts em PowerShell 7.4.6, 7.5.12 (.NET 9) e 7.6.7 (.NET 10) | Aprovados, inclusive leitura de arrays JSON simulando o 5.1 e serialização de arrays encapsulados |
+| C# (`PeDependencies.cs`) com `mcs -langversion:4` e `:5` | Compila (regras do `Add-Type` do Windows PowerShell 5.1) |
+| `package-windows.ps1` com os MSI oficiais 1.26.10 extraídos (msitools), EXE e CRT simulados | Aprovado: 24 plugins, 38 PE na raiz, 642 arestas no grafo, CRT só `vcruntime140`, `vcruntime140_1` e `msvcp140`, licenças de 59 arquivos nativos e 328 crates, ZIP extraído aprovado no `Assert-Inventory` real; também com `ConvertFrom-Json` não enumerado e o alias `Count` do 5.1 ativos |
+| Substituições no ensaio | Versão do SDK fixa (pkg-config é .exe), versão do CRT não lida (o .NET no Linux não lê recursos de DLL nativa) e `--portable-check`/negativos não executados |
+| `cargo test`, `--portable-check` e `clippy` Windows após as mudanças em Rust | Aprovados (20 testes; 35 buffers Opus, 8 frames VP8; dispositivos com tempo limite) |
+
 ## Verificado no código-fonte do GStreamer 1.26.10
 
 - `gstpluginloader-win32.c`: o scanner é procurado em `GST_PLUGIN_SCANNER_1_0`

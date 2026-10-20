@@ -63,7 +63,7 @@ pub fn configure() -> Result<(), String> {
         return Err(std::io::Error::last_os_error().to_string());
     }
     let local = std::env::var_os("LOCALAPPDATA").ok_or("LOCALAPPDATA indisponível")?;
-    let cache = PathBuf::from(local).join("Subdisc/cache/gstreamer");
+    let cache = local_path(Path::new(&local), "Subdisc/cache/gstreamer");
     std::fs::create_dir_all(&cache)
         .map_err(|e| format!("Não foi possível criar {}: {e}", cache.display()))?;
     let registry = cache.join(format!("registry-{:016x}.bin", location_key(root)));
@@ -93,17 +93,20 @@ pub fn configure() -> Result<(), String> {
         }
         // The bundle directory *is* the system plugin path: this replaces the
         // compiled-in/global directories without relying on an empty value.
-        std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", root.join(PLUGIN_DIR));
+        std::env::set_var("GST_PLUGIN_SYSTEM_PATH_1_0", local_path(root, PLUGIN_DIR));
         std::env::set_var("GST_PLUGIN_SCANNER_1_0", root.join(SCANNER));
         std::env::set_var("GST_REGISTRY_1_0", registry);
         std::env::set_var("GST_REGISTRY_UPDATE", "yes");
         std::env::set_var("GST_REGISTRY_FORK", "yes");
         // No GIO modules are shipped; this only keeps global ones from loading.
-        std::env::set_var("GIO_MODULE_DIR", root.join("lib/gio/modules"));
-        std::env::set_var("OPENSSL_MODULES", root.join("lib/ossl-modules"));
-        std::env::set_var("OPENSSL_CONF", root.join("share/openssl/openssl.cnf"));
-        std::env::set_var("SSL_CERT_FILE", root.join(CA_BUNDLE));
-        std::env::set_var("SSL_CERT_DIR", root.join("etc/ssl/certs"));
+        std::env::set_var("GIO_MODULE_DIR", local_path(root, "lib/gio/modules"));
+        std::env::set_var("OPENSSL_MODULES", local_path(root, "lib/ossl-modules"));
+        std::env::set_var(
+            "OPENSSL_CONF",
+            local_path(root, "share/openssl/openssl.cnf"),
+        );
+        std::env::set_var("SSL_CERT_FILE", local_path(root, CA_BUNDLE));
+        std::env::set_var("SSL_CERT_DIR", local_path(root, "etc/ssl/certs"));
         // The upstream scanner is a separate process using the standard search
         // order; GStreamer prepends the core DLL directory (the bundle root) to
         // this PATH when spawning it.
@@ -119,6 +122,13 @@ pub fn configure() -> Result<(), String> {
 #[cfg(not(windows))]
 pub fn configure() -> Result<(), String> {
     Ok(())
+}
+
+/// `relative` uses '/' (as in files.json); the result uses native separators.
+fn local_path(root: &Path, relative: &str) -> PathBuf {
+    relative
+        .split('/')
+        .fold(root.to_path_buf(), |path, part| path.join(part))
 }
 
 #[cfg(windows)]
@@ -264,7 +274,7 @@ pub fn check() -> Result<Value, String> {
             .filename()
             .ok_or_else(|| format!("Plugin sem arquivo: {name}"))?;
         if let Some(root) = portable
-            && filename.parent() != Some(root.join(PLUGIN_DIR).as_path())
+            && filename.parent() != Some(local_path(root, PLUGIN_DIR).as_path())
         {
             return Err(format!("Plugin externo: {}", filename.display()));
         }
@@ -323,20 +333,37 @@ pub fn check() -> Result<Value, String> {
         Value::Null
     };
     // Loads the same device providers as the device menus, without opening devices.
-    // Build/CI machines often have none, so counts are informative only.
-    let devices = ["Audio/Source", "Audio/Sink"].map(|class| {
-        let monitor = gst::DeviceMonitor::new();
-        monitor.add_filter(Some(class), None);
-        if monitor.start().is_err() {
-            return Value::Null;
-        }
-        let count = monitor.devices().len();
-        monitor.stop();
-        json!(count)
+    // Build/CI machines often have no devices or audio service, so the counts are
+    // informative only and a blocking provider cannot stall the check.
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let counts = ["Audio/Source", "Audio/Sink"].map(|class| {
+            let monitor = gst::DeviceMonitor::new();
+            monitor.add_filter(Some(class), None);
+            if monitor.start().is_err() {
+                return None;
+            }
+            let count = monitor.devices().len();
+            monitor.stop();
+            Some(count)
+        });
+        let _ = sender.send(counts);
     });
+    let devices = match receiver.recv_timeout(std::time::Duration::from_secs(20)) {
+        Ok([sources, sinks]) => json!({"sources": sources, "sinks": sinks}),
+        Err(_) => json!("timeout"),
+    };
     #[cfg(windows)]
     let modules = match portable {
-        Some(root) => audit_modules(root, &verify_inventory(root)?, &loaded_modules()?)?,
+        Some(root) => {
+            // One spelling for the bundle and the modules (8.3 names, case,
+            // junctions): e.g. CI temp directories are C:\Users\RUNNER~1\...
+            let loaded: Vec<String> = loaded_modules()?
+                .iter()
+                .map(|module| canonical(Path::new(module)).to_string_lossy().into_owned())
+                .collect();
+            audit_modules(&canonical(root), &verify_inventory(root)?, &loaded)?
+        }
         None => Value::Null,
     };
     #[cfg(not(windows))]
@@ -344,7 +371,7 @@ pub fn check() -> Result<Value, String> {
     Ok(
         json!({"ok":true,"portable":portable.is_some(),"gstreamer":gst::version_string().as_str(),
         "plugins":plugins,"audio_buffers":audio,"video_frames":video,"capture_frames":capture,
-        "audio_sources":devices[0],"audio_sinks":devices[1],"modules":modules,
+        "audio_devices":devices,"modules":modules,
         "registry":std::env::var_os("GST_REGISTRY_1_0").map(|p| p.to_string_lossy().into_owned())}),
     )
 }
@@ -404,6 +431,22 @@ fn roundtrip(description: &str, video: Option<Option<(u32, u32)>>) -> Result<usi
         }
     }
     Err(format!("Timeout processando mídia: {description}"))
+}
+
+/// Full path with long names and resolved links, without the `\\?\` prefix.
+#[cfg(windows)]
+fn canonical(path: &Path) -> PathBuf {
+    let Ok(full) = std::fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    let text = full.to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        PathBuf::from(rest)
+    } else {
+        full
+    }
 }
 
 #[cfg(windows)]
@@ -506,7 +549,11 @@ fn audit_modules(root: &Path, inventory: &[String], modules: &[String]) -> Resul
         let name = path.rsplit('\\').next().unwrap_or_default().to_owned();
         if let Some(relative) = path.strip_prefix(&prefix) {
             local.push(relative.replace('\\', "/"));
-        } else if shipped.contains(&name) || runtime_like(&name) {
+        } else if shipped.contains(&name)
+            // Inbox components (e.g. msvcp_win.dll) are fine; a GStreamer- or
+            // CRT-like DLL outside Windows comes from a global installation.
+            || (!path.starts_with(&windows) && runtime_like(&name))
+        {
             return Err(format!(
                 "DLL carregada fora do pacote: {module}. {}",
                 repair_hint()
@@ -629,13 +676,14 @@ mod tests {
         let windows = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into());
         let ok = [
             r"C:\Users\Zoë\Subdisc portable\subdisc-client.exe".to_owned(),
-            r"c:\users\zoë\subdisc portable\lib\gstreamer-1.0\gstwebrtc.dll".to_owned(),
+            r"c:\users\zoë\subdisc portable\lib/gstreamer-1.0\gstwebrtc.dll".to_owned(),
             format!(r"{windows}\System32\kernel32.dll"),
+            format!(r"{windows}\System32\msvcp_win.dll"),
             r"C:\Program Files\Antivirus\hook64.dll".to_owned(),
         ];
         let report = audit_modules(root, &inventory, &ok).unwrap();
         assert_eq!(report["bundle"].as_array().unwrap().len(), 2);
-        assert_eq!(report["windows"], 1);
+        assert_eq!(report["windows"], 2);
         assert_eq!(report["external"].as_array().unwrap().len(), 1);
         for bad in [
             format!(r"{windows}\System32\vcruntime140.dll"),

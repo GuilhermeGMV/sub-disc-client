@@ -86,7 +86,7 @@ try {
     $env:SUBDISC_KEEP = 'original'
     $path = [Environment]::GetEnvironmentVariable('PATH', 'Process')
     $saved = Save-ProcessEnvironment
-    $env:SUBDISC_KEEP = 'changed'; $env:SUBDISC_NEW = 'x'; [Environment]::SetEnvironmentVariable('PATH', $null, 'Process')
+    $env:SUBDISC_KEEP = 'changed'; $env:SUBDISC_NEW = 'x'; [Environment]::SetEnvironmentVariable('PATH', [NullString]::Value, 'Process')
     Restore-ProcessEnvironment $saved
     $keep = [Environment]::GetEnvironmentVariable('SUBDISC_KEEP', 'Process')
     $added = [Environment]::GetEnvironmentVariable('SUBDISC_NEW', 'Process')
@@ -120,5 +120,66 @@ try {
     $archive.Dispose(); $stream.Dispose()
     Must-Fail { Expand-PortableZip $evil (Join-Path $work 'zip/evil-out') }
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $work 'zip/evil.dll'))) 'Escaping ZIP entry was extracted'
-    Write-Host 'PASS: normal/delay imports, x64, malformed PE, linker version, path traversal, missing/transitive DLLs, import closure, inbox classification, native exit codes/timeouts/quoting, environment restore, ZIP layout/roundtrip/escape rejection.'
+    # ZIP timestamps before 1980 do not exist; such files are clamped, not fatal.
+    $old = Join-Path $tree 'old.txt'
+    Write-Utf8 $old 'x'
+    (Get-Item -LiteralPath $old).LastWriteTime = New-Object DateTime(1970, 1, 1, 12, 0, 0)
+    New-PortableZip $tree (Join-Path $work 'zip/old.zip')
+
+    # JSON arrays: one, many and zero elements, also with the Windows PowerShell
+    # 5.1 behaviour of emitting the whole array as one object.
+    $json = Join-Path $work 'array.json'
+    function Test-JsonArray {
+        Write-Utf8 $json '[{"path":"a"},{"path":"b"}]'
+        $two = Read-JsonArray $json
+        Assert-True ($two.Count -eq 2 -and $two[1].path -eq 'b') "JSON array of two: $($two.Count)"
+        Write-Utf8 $json '[{"path":"a"}]'
+        $one = Read-JsonArray $json
+        Assert-True ($one.Count -eq 1 -and $one[0].path -eq 'a') "JSON array of one: $($one.Count)"
+        Write-Utf8 $json '[]'
+        Assert-True ((Read-JsonArray $json).Count -eq 0) 'Empty JSON array'
+    }
+    Test-JsonArray
+    if ($PSVersionTable.PSVersion.Major -ge 7) {
+        function ConvertFrom-Json { param([Parameter(ValueFromPipeline)][string]$InputObject) process { Microsoft.PowerShell.Utility\ConvertFrom-Json -InputObject $InputObject -NoEnumerate } }
+        try { Test-JsonArray } finally { Remove-Item Function:ConvertFrom-Json }
+    }
+    # A PSObject-wrapped array stays a JSON array (Windows PowerShell 5.1 would
+    # otherwise write {"value":[..],"Count":n} into files.json/the manifest).
+    $wrapped = [psobject]@(1, 2)
+    $text = ConvertTo-Json -InputObject ([ordered]@{ list = $wrapped; plain = @(3) }) -Compress
+    Assert-True ($text -ceq '{"list":[1,2],"plain":[3]}') "JSON array serialization: $text"
+    $text = ConvertTo-Json -InputObject @([ordered]@{ a = 1 }) -Compress
+    Assert-True ($text -ceq '[{"a":1}]') "JSON single-element array: $text"
+
+    if ($env:OS -eq 'Windows_NT') {
+        # Native runner: exit code, stdout+stderr in the log file, environment
+        # overrides/removal, Unicode working directory, and a timeout that ends
+        # the whole process tree.
+        $dir = Join-Path $work ('dir ' + [char]0x00E7 + ' ' + [char]0x4E2D)
+        $null = New-Item -ItemType Directory -Path $dir
+        $env:SUBDISC_REMOVED = 'present'
+        try {
+            # ASCII output only (a console child writes in the OEM code page); the
+            # Unicode working directory is proven by a file created relative to it.
+            $script = "[Console]::Out.Write('out|' + `$env:SUBDISC_ISOLATED + '|' + [Environment]::GetEnvironmentVariable('SUBDISC_REMOVED') + '|'); [Console]::Error.Write('err|'); Set-Content -LiteralPath 'cwd-marker.txt' -Value 'x'; exit 3"
+            $run = Invoke-Isolated $shell @('-NoProfile','-NonInteractive','-Command',$script) -WorkingDirectory $dir -LogPath (Join-Path $work 'run.log') -Environment @{ SUBDISC_ISOLATED = 'a b'; SUBDISC_REMOVED = $null } -TimeoutSeconds 60
+            Assert-True ($run.ExitCode -eq 3) "Isolated exit code: $($run.ExitCode) $($run.Output)"
+            Assert-True ($run.Output -match '^out\|a b\|\|' -and $run.Output.Contains('err|')) "Isolated output: $($run.Output)"
+            Assert-True (Test-Path -LiteralPath (Join-Path $dir 'cwd-marker.txt')) 'Isolated working directory (Unicode) not used'
+        } finally { Remove-Item Env:SUBDISC_REMOVED }
+        $pidFile = Join-Path $work 'grandchild.pid'
+        $script = "`$p = Start-Process -PassThru -NoNewWindow -FilePath '$shell' -ArgumentList '-NoProfile','-NonInteractive','-Command','Start-Sleep 120'; Set-Content -LiteralPath '$pidFile' `$p.Id; Start-Sleep 120"
+        $timedOut = $false
+        try { $null = Invoke-Isolated $shell @('-NoProfile','-NonInteractive','-Command',$script) -WorkingDirectory $work -LogPath (Join-Path $work 'timeout.log') -TimeoutSeconds 10 }
+        catch { $timedOut = $_.Exception.Message -match 'Timed out' }
+        Assert-True $timedOut 'Isolated timeout was not reported'
+        Assert-True (Test-Path -LiteralPath $pidFile) 'Grandchild did not start'
+        $grandchild = [int](Get-Content -LiteralPath $pidFile -Raw)
+        Start-Sleep -Seconds 2
+        $alive = Get-Process -Id $grandchild -ErrorAction SilentlyContinue
+        if ($alive) { Stop-Process -Id $grandchild -Force -ErrorAction SilentlyContinue }
+        Assert-True (-not $alive) 'Timeout did not end the grandchild process (job object)'
+    }
+    Write-Host 'PASS: normal/delay imports, x64, malformed PE, linker version, path traversal, missing/transitive DLLs, import closure, inbox classification, native exit codes/timeouts/quoting, environment restore, ZIP layout/roundtrip/escape rejection/timestamps, JSON arrays (5.1 and 7 behaviour), native runner (Windows only).'
 } finally { Remove-Item -LiteralPath $work -Recurse -Force }

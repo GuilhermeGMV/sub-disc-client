@@ -97,10 +97,18 @@ try {
 
     # The app-local CRT must be at least as new as the newest MSVC toolset that
     # linked any bundled component (e.g. GStreamer built with a newer VS).
-    $crtFiles = @($origins.GetEnumerator() | Where-Object Value -eq 'msvc-redist' | ForEach-Object { Join-Path $bundle $_.Key })
-    $crtVersions = @($crtFiles | ForEach-Object { $info = [Diagnostics.FileVersionInfo]::GetVersionInfo($_); New-Object Version($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart) } | Sort-Object -Unique)
-    if ($crtVersions.Count -ne 1) { throw "Mixed MSVC redistributable versions: $($crtVersions -join ', ')" }
-    $crtVersion = $crtVersions[0]
+    # The app-local files come from one Microsoft.VC14x.CRT folder; they must all
+    # belong to the same toolset (major.minor), individual builds may differ.
+    if (-not (Test-Path -LiteralPath (Join-Path $bundle 'vcruntime140.dll'))) { throw 'No bundled binary imports vcruntime140.dll: unexpected for an MSVC build.' }
+    $crtInfo = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $bundle 'vcruntime140.dll'))
+    $crtVersion = New-Object Version($crtInfo.FileMajorPart, $crtInfo.FileMinorPart, $crtInfo.FileBuildPart, $crtInfo.FilePrivatePart)
+    if ($crtVersion.Major -ne 14) { throw "Unexpected vcruntime140.dll version $crtVersion in $CrtDirectory" }
+    foreach ($entry in $origins.GetEnumerator() | Where-Object Value -eq 'msvc-redist') {
+        $info = [Diagnostics.FileVersionInfo]::GetVersionInfo((Join-Path $bundle $entry.Key))
+        if ($info.FileMajorPart -ne $crtVersion.Major -or $info.FileMinorPart -ne $crtVersion.Minor) {
+            throw "Mixed MSVC redistributable toolsets: $($entry.Key) $($info.FileVersion) vs vcruntime140.dll $crtVersion"
+        }
+    }
     $newest = $null
     foreach ($file in Get-ChildItem -LiteralPath $bundle -Recurse -File | Where-Object { $_.Extension -in '.dll','.exe' -and $_.Name -notmatch $crtPattern }) {
         $linker = Get-PeLinkerVersion $file.FullName
@@ -160,7 +168,7 @@ try {
     # The ZIP is promoted last: its presence implies every step above passed.
     Move-Item -LiteralPath $zipTemp -Destination $zip
     $bytes = (Get-ChildItem -LiteralPath $final -Recurse -File | Measure-Object Length -Sum).Sum
-    Write-Host ("Portable folder: {0} ({1:N2} MiB, {2} files)" -f $final, ($bytes / 1MB), $files.Count + 1)
+    Write-Host ("Portable folder: {0} ({1:N2} MiB, {2} files)" -f $final, ($bytes / 1MB), ($files.Count + 1))
     Write-Host ("ZIP: {0} ({1:N2} MiB)" -f $zip, ((Get-Item -LiteralPath $zip).Length / 1MB))
     Write-Host "Executable: $final\subdisc-client.exe"
 } catch {
