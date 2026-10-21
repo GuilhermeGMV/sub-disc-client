@@ -187,6 +187,19 @@ impl Backend {
                     }),
                 }
             }
+            Command::Admin { method, path, body } => {
+                let Some(api) = self.api.clone() else { return };
+                let result = api.request::<serde_json::Value>(method, &path, body).await;
+                match result {
+                    Ok(_) => {
+                        if let Ok(state) = api.state().await {
+                            self.ui.send(Event::Snapshot(state));
+                        }
+                        self.ui.send(Event::AdminFinished(Ok(())));
+                    }
+                    Err(e) => self.ui.send(Event::AdminFinished(Err(e.message))),
+                }
+            }
             Command::Logout => {
                 if let Some(api) = &self.api {
                     let _ = api.logout().await;
@@ -385,8 +398,7 @@ impl Backend {
                 ServerEvent::VoiceReset => {
                     if self.voice.is_some() {
                         self.leave_voice().await;
-                        self.ui
-                            .error("A chamada foi reiniciada pelo servidor. Entre novamente.");
+                        self.ui.error("A chamada foi encerrada pelo servidor.");
                     }
                 }
             },

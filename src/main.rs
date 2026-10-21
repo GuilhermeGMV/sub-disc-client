@@ -1,6 +1,7 @@
 //! Cliente nativo do Subdisc: chat, voz e compartilhamento de tela.
 // No Windows, o build de release não abre uma janela de console junto.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+mod admin_ui;
 mod api;
 mod audio;
 mod backend;

@@ -7,6 +7,12 @@ nativa e a mídia usa o WebRTC nativo do SDK oficial do LiveKit.
 
 ## Funcionalidades
 
+- Painel **Administração** para contas `admin`: criar/editar usuários, redefinir
+  senhas, atribuir `admin`/`member`, apagar contas, tirar participantes de chamadas
+  e criar canais de voz ou texto. Requer o backend atualizado no repositório
+  `../sub-disc`; as permissões são verificadas pelo servidor. O último admin é
+  protegido. Apagar conta também apaga suas mensagens e convites.
+
 - Entrar com usuário e senha, criar conta com convite ou criar o primeiro
   administrador (`SETUP_KEY`). A sessão fica salva em
   `~/.config/subdisc-client/config.json` (permissão 0600).

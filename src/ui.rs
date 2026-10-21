@@ -78,6 +78,7 @@ pub struct App {
     audio: AudioSettings,
     demo: bool,
     share: ShareDialog,
+    admin: crate::admin_ui::AdminPanel,
 }
 
 impl App {
@@ -95,6 +96,7 @@ impl App {
         Self {
             demo,
             share: ShareDialog::default(),
+            admin: crate::admin_ui::AdminPanel::default(),
             cmd,
             events,
             frames,
@@ -145,6 +147,7 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::AdminFinished(result) => self.admin.finish(result),
             Event::Sources { request, result } => self.share.receive(request, result),
             Event::Probed { needs_setup } => {
                 self.form.needs_setup = needs_setup;
@@ -165,6 +168,7 @@ impl App {
             Event::LoggedOut { error } => {
                 self.form.busy = false;
                 self.user = None;
+                self.admin = crate::admin_ui::AdminPanel::default();
                 self.snapshot = Snapshot::default();
                 self.messages.clear();
                 self.selected = None;
@@ -182,6 +186,11 @@ impl App {
             }
             Event::Connection(connected) => self.connected = connected,
             Event::Snapshot(snapshot) => {
+                if let Some(current) = &mut self.user {
+                    if let Some(updated) = snapshot.users.iter().find(|u| u.id == current.id) {
+                        *current = updated.clone();
+                    }
+                }
                 self.snapshot = snapshot;
                 let text = |id: &String| {
                     self.snapshot
@@ -422,6 +431,11 @@ impl App {
                         .on_hover_text(text);
                 });
                 ui.separator();
+                if self.user.as_ref().is_some_and(|u| u.role == "admin")
+                    && ui.button("Administração").clicked()
+                {
+                    self.admin.open = true;
+                }
                 egui::ScrollArea::vertical()
                     .auto_shrink(false)
                     .show(ui, |ui| {
@@ -1055,6 +1069,14 @@ impl eframe::App for App {
                 for command in self.share.show(&ui.ctx().clone(), self.demo) {
                     self.send(command);
                 }
+                if let Some(command) = self.admin.show(
+                    &ui.ctx().clone(),
+                    &self.snapshot,
+                    self.user.as_ref(),
+                    self.demo,
+                ) {
+                    self.send(command);
+                }
                 if self.audio.open {
                     self.audio_window(&ui.ctx().clone());
                 }
@@ -1215,6 +1237,24 @@ mod tests {
         });
         assert!(app.share.open);
         app.share.open = false;
+        app.admin.open = true;
+        let _ = paint(&ctx, |_ui| {
+            app.admin.show(&ctx, &app.snapshot, app.user.as_ref(), true);
+        });
+        assert!(app.admin.open);
+        let mut downgraded = app.snapshot.clone();
+        let id = app.user.as_ref().unwrap().id.clone();
+        downgraded
+            .users
+            .iter_mut()
+            .find(|u| u.id == id)
+            .unwrap()
+            .role = "member".into();
+        app.handle(Event::Snapshot(downgraded));
+        let _ = paint(&ctx, |_ui| {
+            app.admin.show(&ctx, &app.snapshot, app.user.as_ref(), true);
+        });
+        assert!(!app.admin.open);
         app.audio.open = true;
         let _ = paint(&ctx, |_ui| app.audio_window(&ctx));
         app.handle(Event::Voice(None));
