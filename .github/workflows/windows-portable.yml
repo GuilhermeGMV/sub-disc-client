@@ -68,24 +68,25 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
-          $package = 'dist/Subdisc-Windows-x64-livekit'
+          Copy-Item dist/subdisc-client.exe dist/kledisc.exe
+          $package = 'dist/kledisc-Windows-x64-livekit'
           New-Item -ItemType Directory -Force "$package/licenses" | Out-Null
-          Copy-Item dist/subdisc-client.exe "$package/subdisc-client.exe"
+          Copy-Item dist/subdisc-client.exe "$package/kledisc.exe"
           Copy-Item README.md "$package/README.md"
           Copy-Item vendor/webrtc-sys/NOTICE.md "$package/licenses/WebRTC-NOTICE.md"
           Get-ChildItem vendor -Recurse -File -Filter 'LICENSE*' | ForEach-Object {
             $name = $_.FullName.Substring((Join-Path (Get-Location) 'vendor').Length + 1) -replace '[\\/]', '-'
             Copy-Item $_.FullName "$package/licenses/$name"
           }
-          Compress-Archive -Path "$package/*" -DestinationPath dist/Subdisc-Windows-x64-livekit.zip -Force
-          $hash = (Get-FileHash dist/Subdisc-Windows-x64-livekit.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  Subdisc-Windows-x64-livekit.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+          Compress-Archive -Path "$package/*" -DestinationPath dist/kledisc-Windows-x64-livekit.zip -Force
+          $hash = (Get-FileHash dist/kledisc-Windows-x64-livekit.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  kledisc-Windows-x64-livekit.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
       - uses: actions/upload-artifact@v4
         with:
-          name: Subdisc-Windows-x64-livekit
+          name: kledisc-Windows-x64-livekit
           path: |
-            dist/subdisc-client.exe
-            dist/Subdisc-Windows-x64-livekit.zip
+            dist/kledisc.exe
+            dist/kledisc-Windows-x64-livekit.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
@@ -142,25 +143,26 @@ jobs:
       - name: Package executable and notices
         run: |
           set -euo pipefail
-          package=dist/Subdisc-Linux-x64-livekit
+          package=dist/kledisc-Linux-x64-livekit
           mkdir -p "$package/licenses"
-          install -m 755 target/release/subdisc-client "$package/subdisc-client"
+          install -m 755 target/release/subdisc-client "$package/kledisc"
+          cp assets/kledisc.png assets/kledisc.desktop assets/install-local.sh "$package/"
           cp README.md "$package/README.md"
           cp vendor/webrtc-sys/NOTICE.md "$package/licenses/WebRTC-NOTICE.md"
           while IFS= read -r -d '' license; do
             name=${license#vendor/}
             cp "$license" "$package/licenses/${name//\//-}"
           done < <(find vendor -type f -name 'LICENSE*' -print0)
-          file "$package/subdisc-client"
-          ldd "$package/subdisc-client" | tee dist/linux-dependencies.txt
+          file "$package/kledisc"
+          ldd "$package/kledisc" | tee dist/linux-dependencies.txt
           if grep -q 'not found' dist/linux-dependencies.txt; then exit 1; fi
-          tar -czf dist/Subdisc-Linux-x64-livekit.tar.gz -C dist Subdisc-Linux-x64-livekit
-          (cd dist && sha256sum Subdisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt)
+          tar -czf dist/kledisc-Linux-x64-livekit.tar.gz -C dist kledisc-Linux-x64-livekit
+          (cd dist && sha256sum kledisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt)
       - uses: actions/upload-artifact@v4
         with:
-          name: Subdisc-Linux-x64-livekit
+          name: kledisc-Linux-x64-livekit
           path: |
-            dist/Subdisc-Linux-x64-livekit.tar.gz
+            dist/kledisc-Linux-x64-livekit.tar.gz
             dist/linux-dependencies.txt
             dist/SHA256SUMS.txt
           if-no-files-found: error
@@ -175,11 +177,11 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: Subdisc-Windows-x64-livekit
+          name: kledisc-Windows-x64-livekit
           path: release
       - uses: actions/download-artifact@v4
         with:
-          name: Subdisc-Linux-x64-livekit
+          name: kledisc-Linux-x64-livekit
           path: linux-release
       - name: Publish GitHub Release
         env:
@@ -187,13 +189,13 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          cp linux-release/Subdisc-Linux-x64-livekit.tar.gz release/
+          cp linux-release/kledisc-Linux-x64-livekit.tar.gz release/
           cd release
-          sha256sum Subdisc-Windows-x64-livekit.zip Subdisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt
-          files=(Subdisc-Windows-x64-livekit.zip Subdisc-Linux-x64-livekit.tar.gz SHA256SUMS.txt)
+          sha256sum kledisc-Windows-x64-livekit.zip kledisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt
+          files=(kledisc-Windows-x64-livekit.zip kledisc-Linux-x64-livekit.tar.gz SHA256SUMS.txt)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "Subdisc $TAG (Windows e Linux x64 LiveKit)" --generate-notes
+              --title "kledisc $TAG (Windows e Linux x64 LiveKit)" --generate-notes
           fi

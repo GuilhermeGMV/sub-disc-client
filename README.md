@@ -1,6 +1,6 @@
-# Subdisc Client
+# kledisc Client
 
-Cliente nativo e leve para servidores [Subdisc](../sub-disc), escrito em Rust:
+Cliente nativo e leve para servidores [kledisc](../sub-disc), escrito em Rust:
 chat em tempo real, salas de voz, vídeos/telas dos outros participantes e
 compartilhamento de tela. Não usa navegador nem Electron: a interface é egui
 nativa e a mídia usa o WebRTC nativo do SDK oficial do LiveKit.
@@ -38,10 +38,10 @@ sem build validado).
 Em **Actions > Windows and Linux executables (master)**, cada push de código na
 `master` gera dois artefatos; também é possível iniciar pelo **Run workflow**:
 
-- `Subdisc-Windows-x64-livekit`: executável `.exe`, ZIP e checksum SHA-256.
-- `Subdisc-Linux-x64-livekit`: pacote `.tar.gz`, checksum SHA-256 e relatório
-  das bibliotecas dinâmicas. Extraia com `tar -xzf Subdisc-Linux-x64-livekit.tar.gz`
-  e execute `./Subdisc-Linux-x64-livekit/subdisc-client`.
+- `kledisc-Windows-x64-livekit`: executável `.exe`, ZIP e checksum SHA-256.
+- `kledisc-Linux-x64-livekit`: pacote `.tar.gz`, checksum SHA-256 e relatório
+  das bibliotecas dinâmicas. Extraia com `tar -xzf kledisc-Linux-x64-livekit.tar.gz`
+  e execute `./kledisc-Linux-x64-livekit/subdisc-client`.
 
 O executável Linux é nativo (sem extensão `.exe`), compilado no Ubuntu 22.04
 para x86_64, e precisa das bibliotecas de desktop descritas abaixo. O pacote
@@ -261,3 +261,5 @@ automaticamente para outro dispositivo. A câmera e a tela podem ser publicadas
 simultaneamente. O demo usa apenas frames sintéticos, sem abrir dispositivos.
 
 Durante a chamada, use **Ocultar vídeo** em uma câmera ou tela compartilhada e **Ver novamente** para restaurá-la. Também é possível ocultar ou restaurar todos os vídeos recebidos. A escolha é local, dura até sair da chamada e não altera o áudio nem a transmissão dos outros participantes. Vídeos ocultos continuam sendo recebidos, mas não são exibidos.
+
+O pacote Linux inclui o ícone e o atalho kledisc. Para instalar no menu do usuário, extraia o pacote e execute `bash install-local.sh` (requer Python 3).

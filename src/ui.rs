@@ -298,7 +298,7 @@ impl App {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space((ui.available_height() * 0.15).max(16.0));
-                ui.heading(RichText::new("Subdisc").size(32.0).color(ACCENT));
+                ui.heading(RichText::new("kledisc").size(32.0).color(ACCENT));
                 ui.label("Seu ponto de encontro.");
                 ui.add_space(20.0);
                 ui.set_max_width(340.0);
@@ -434,7 +434,7 @@ impl App {
                 });
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    ui.heading(RichText::new("Subdisc").color(ACCENT));
+                    ui.heading(RichText::new("kledisc").color(ACCENT));
                     let (color, text) = if self.connected {
                         (ACCENT, "Conectado")
                     } else {

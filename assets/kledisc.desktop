@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=kledisc
+Comment=Chat, voz e vídeo
+Exec=kledisc
+Icon=kledisc
+Terminal=false
+Categories=Network;Chat;
+StartupWMClass=kledisc

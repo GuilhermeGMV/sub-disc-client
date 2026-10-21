@@ -1,4 +1,4 @@
-//! Cliente nativo do Subdisc: chat, voz e compartilhamento de tela.
+//! Cliente nativo do kledisc: chat, voz e compartilhamento de tela.
 // No Windows, o build de release não abre uma janela de console junto.
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 mod admin_ui;
@@ -59,8 +59,12 @@ fn main() -> eframe::Result {
     let frames = Frames::default();
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
-            .with_title("Subdisc")
-            .with_app_id("subdisc-client")
+            .with_title("kledisc")
+            .with_app_id("kledisc")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/kledisc.png"))
+                    .expect("application icon"),
+            )
             .with_inner_size([1100.0, 720.0])
             .with_min_inner_size([640.0, 420.0]),
         ..Default::default()
@@ -69,7 +73,7 @@ fn main() -> eframe::Result {
     let task = std::sync::Arc::new(std::sync::Mutex::new(None));
     let task_slot = task.clone();
     let result = eframe::run_native(
-        "Subdisc",
+        "kledisc",
         options,
         Box::new(move |cc| {
             let sink = UiSink::new(event_tx, cc.egui_ctx.clone());
