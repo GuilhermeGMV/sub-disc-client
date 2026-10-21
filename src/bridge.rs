@@ -119,6 +119,10 @@ pub enum Event {
     LoggedOut {
         error: Option<String>,
     },
+    /// A conta salva continua; o servidor ainda não respondeu e o backend tenta de novo.
+    Reconnecting {
+        error: String,
+    },
     Connection(bool),
     Snapshot(Snapshot),
     Presence {
