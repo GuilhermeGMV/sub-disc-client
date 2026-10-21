@@ -81,7 +81,9 @@ async fn session(
     }
     let stream = match tokio_tungstenite::connect_async(request).await {
         Ok((stream, _)) => stream,
-        Err(tungstenite::Error::Http(res)) if matches!(res.status().as_u16(), 401 | 403) => {
+        // Só o 401 diz que a sessão não vale mais; o 403 vem da checagem de
+        // Origin (APP_ORIGIN do servidor) e não deve apagar a conta salva.
+        Err(tungstenite::Error::Http(res)) if res.status().as_u16() == 401 => {
             let _ = events.send(WsEvent::Unauthorized);
             return Err(Stop);
         }

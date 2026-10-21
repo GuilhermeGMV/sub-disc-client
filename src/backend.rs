@@ -12,6 +12,9 @@ use reqwest::StatusCode;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
+/// Resposta definitiva sobre a sessão salva: aceita ou recusada pelo servidor.
+type Resumed = Result<(Api, crate::model::User), String>;
+
 struct Backend {
     ui: UiSink,
     frames: Frames,
@@ -19,6 +22,9 @@ struct Backend {
     api: Option<Api>,
     ws: Option<tokio::task::JoinHandle<()>>,
     ws_tx: mpsc::UnboundedSender<WsEvent>,
+    /// Tentativas de reabrir a sessão salva enquanto o servidor não responde.
+    resuming: Option<tokio::task::JoinHandle<()>>,
+    resumed_tx: mpsc::UnboundedSender<Resumed>,
     presence: PresenceOut,
     voice: Option<VoiceHandle>,
     audio: Option<PlatformAudio>,
@@ -28,6 +34,7 @@ struct Backend {
 
 pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, frames: Frames) {
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel();
+    let (resumed_tx, mut resumed_rx) = mpsc::unbounded_channel();
     let mut backend = Backend {
         ui,
         frames,
@@ -35,13 +42,15 @@ pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, fra
         api: None,
         ws: None,
         ws_tx,
+        resuming: None,
+        resumed_tx,
         presence: PresenceOut::default(),
         voice: None,
         audio: None,
         deafened: false,
         volume_dirty: None,
     };
-    backend.resume().await;
+    backend.resume();
     let mut save_tick = tokio::time::interval(Duration::from_millis(250));
     loop {
         tokio::select! {
@@ -56,6 +65,7 @@ pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, fra
                 None => break,
             },
             Some(event) = ws_rx.recv() => backend.ws_event(event).await,
+            Some(resumed) = resumed_rx.recv() => backend.resumed(resumed),
         }
     }
     if backend.volume_dirty.is_some() {
@@ -65,24 +75,49 @@ pub async fn run(mut commands: mpsc::UnboundedReceiver<Command>, ui: UiSink, fra
 }
 
 impl Backend {
-    /// Reabre a sessão salva, se ainda for válida.
-    async fn resume(&mut self) {
+    /// Reabre a sessão salva. Sem resposta do servidor (rede fora, servidor
+    /// reiniciando) a conta continua salva e a tentativa se repete sozinha; só
+    /// a sessão recusada pelo servidor volta para a tela de entrada.
+    fn resume(&mut self) {
         let Some(session) = self.config.session.clone() else {
             self.ui.send(Event::LoggedOut { error: None });
             return;
         };
         let api = Api::new(self.config.server.clone(), Some(session));
-        match api.me().await {
-            Ok(user) => self.start_session(api, user),
-            Err(e) => {
-                if e.status == Some(StatusCode::UNAUTHORIZED) {
-                    self.config.session = None;
-                    self.config.save();
+        let (ui, done) = (self.ui.clone(), self.resumed_tx.clone());
+        self.resuming = Some(tokio::spawn(async move {
+            let mut delay = Duration::from_secs(2);
+            let result = loop {
+                match api.me().await {
+                    Ok(user) => break Ok(user),
+                    Err(e) if e.status == Some(StatusCode::UNAUTHORIZED) => break Err(e.message),
+                    Err(e) => ui.send(Event::Reconnecting { error: e.message }),
                 }
-                self.ui.send(Event::LoggedOut {
-                    error: Some(e.message),
-                });
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(30));
+            };
+            let _ = done.send(result.map(|user| (api, user)));
+        }));
+    }
+
+    fn resumed(&mut self, result: Resumed) {
+        // Retomada já cancelada: o usuário saiu ou entrou com outra conta.
+        if self.resuming.take().is_none() {
+            return;
+        }
+        match result {
+            Ok((api, user)) => self.start_session(api, user),
+            Err(error) => {
+                self.config.session = None;
+                self.config.save();
+                self.ui.send(Event::LoggedOut { error: Some(error) });
             }
+        }
+    }
+
+    fn stop_resuming(&mut self) {
+        if let Some(task) = self.resuming.take() {
+            task.abort();
         }
     }
 
@@ -101,6 +136,7 @@ impl Backend {
     }
 
     async fn end_session(&mut self, error: Option<String>) {
+        self.stop_resuming();
         self.leave_voice().await;
         if let Some(ws) = self.ws.take() {
             ws.abort();
@@ -126,6 +162,7 @@ impl Backend {
                 password,
                 mode,
             } => {
+                self.stop_resuming();
                 let origin = match normalize_origin(&server) {
                     Ok(o) => o,
                     Err(e) => return self.ui.send(Event::LoggedOut { error: Some(e) }),

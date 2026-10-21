@@ -22,6 +22,8 @@ enum Tab {
 
 enum Screen {
     Loading,
+    /// Conta salva; o servidor ainda não respondeu (motivo da última tentativa).
+    Reconnecting(String),
     Login,
     Main,
 }
@@ -172,6 +174,12 @@ impl App {
                     self.show_error(e);
                 }
             }
+            // Só vale na abertura: uma tentativa atrasada não tira o usuário do login.
+            Event::Reconnecting { error } => {
+                if matches!(self.screen, Screen::Loading | Screen::Reconnecting(_)) {
+                    self.screen = Screen::Reconnecting(error);
+                }
+            }
             Event::Connection(connected) => self.connected = connected,
             Event::Snapshot(snapshot) => {
                 self.snapshot = snapshot;
@@ -241,6 +249,27 @@ impl App {
             }
             Event::Error(message) => self.show_error(message),
         }
+    }
+
+    /// A conta salva não precisa da senha de novo: o backend repete a tentativa
+    /// sozinho; o botão descarta a sessão salva e abre a tela de entrada.
+    fn reconnecting_screen(&self, ui: &mut egui::Ui, error: &str) {
+        egui::CentralPanel::default().show(ui, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space((ui.available_height() * 0.3).max(16.0));
+                ui.spinner();
+                ui.add_space(8.0);
+                ui.label(format!(
+                    "Conectando a {} como {}…",
+                    self.form.server, self.form.username
+                ));
+                ui.label(RichText::new(error).weak());
+                ui.add_space(12.0);
+                if ui.button("Entrar com outra conta").clicked() {
+                    self.send(Command::Logout);
+                }
+            });
+        });
     }
 
     fn login_screen(&mut self, ui: &mut egui::Ui) {
@@ -1013,6 +1042,7 @@ impl eframe::App for App {
                 egui::CentralPanel::default()
                     .show(ui, |ui| ui.centered_and_justified(|ui| ui.spinner()));
             }
+            Screen::Reconnecting(ref error) => self.reconnecting_screen(ui, error),
             Screen::Login => self.login_screen(ui),
             Screen::Main => {
                 if !self.fullscreen {
@@ -1119,6 +1149,30 @@ fn volume_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_account_waits_for_the_server_without_asking_the_password() {
+        let (cmd, _commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_, events) = mpsc::channel();
+        let mut app = App::new(cmd, events, Frames::default(), true);
+        app.handle(Event::Reconnecting {
+            error: "Servidor inacessível".into(),
+        });
+        assert!(matches!(&app.screen, Screen::Reconnecting(e) if e == "Servidor inacessível"));
+        let ctx = egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            app.reconnecting_screen(ui, "Servidor inacessível")
+        });
+        assert!(!output.shapes.is_empty());
+        output.textures_delta.clear();
+        app.handle(Event::LoggedOut { error: None });
+        assert!(matches!(app.screen, Screen::Login));
+        // Uma tentativa atrasada não tira o usuário da tela de entrada.
+        app.handle(Event::Reconnecting {
+            error: "Servidor inacessível".into(),
+        });
+        assert!(matches!(app.screen, Screen::Login));
+    }
 
     #[test]
     fn shared_ui_renders_call_expansion_chat_and_modals_offline() {
