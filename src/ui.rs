@@ -186,10 +186,10 @@ impl App {
             }
             Event::Connection(connected) => self.connected = connected,
             Event::Snapshot(snapshot) => {
-                if let Some(current) = &mut self.user {
-                    if let Some(updated) = snapshot.users.iter().find(|u| u.id == current.id) {
-                        *current = updated.clone();
-                    }
+                if let Some(current) = &mut self.user
+                    && let Some(updated) = snapshot.users.iter().find(|u| u.id == current.id)
+                {
+                    *current = updated.clone();
                 }
                 self.snapshot = snapshot;
                 let text = |id: &String| {

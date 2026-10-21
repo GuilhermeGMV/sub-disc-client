@@ -11,6 +11,10 @@ pub struct User {
     pub role: String,
 }
 
+fn member_role() -> String {
+    "member".into()
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelKind {
@@ -144,8 +148,4 @@ mod tests {
             r#"{"v":1,"type":"media","lease":"l","muted":true,"camera":false,"screen":false}"#
         );
     }
-}
-
-fn member_role() -> String {
-    "member".into()
 }
