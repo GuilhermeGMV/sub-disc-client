@@ -84,8 +84,14 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: kledisc-Windows-x64-livekit
+          path: dist/kledisc.exe
+          if-no-files-found: error
+      # Only tagged releases need the archive with notices and checksums.
+      - uses: actions/upload-artifact@v4
+        if: startsWith(github.ref, 'refs/tags/v')
+        with:
+          name: kledisc-Windows-release-package
           path: |
-            dist/kledisc.exe
             dist/kledisc-Windows-x64-livekit.zip
             dist/SHA256SUMS.txt
           if-no-files-found: error
@@ -177,7 +183,7 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: kledisc-Windows-x64-livekit
+          name: kledisc-Windows-release-package
           path: release
       - uses: actions/download-artifact@v4
         with:
