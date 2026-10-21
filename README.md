@@ -1,9 +1,147 @@
-# kledisc Client
+# kledisc — cliente desktop
 
-Cliente nativo e leve para servidores [kledisc](../sub-disc), escrito em Rust:
-chat em tempo real, salas de voz, vídeos/telas dos outros participantes e
-compartilhamento de tela. Não usa navegador nem Electron: a interface é egui
-nativa e a mídia usa o WebRTC nativo do SDK oficial do LiveKit.
+Cliente Rust nativo para o [servidor kledisc](https://github.com/GuilhermeGMV/sub-disc), com chat, voz, câmera, compartilhamento de tela e administração. A interface usa egui e a mídia usa o WebRTC do SDK LiveKit. Não depende de navegador ou Electron.
+
+## Compilar e executar — comandos rápidos
+
+Execute na **raiz deste repositório**, depois de instalar os requisitos descritos abaixo. A primeira compilação precisa de internet para baixar crates, componentes do WebRTC e, no Linux, o Clang preparado pelo projeto.
+
+### Windows 10/11 x64 — PowerShell
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
+# Se a compilação terminou com sucesso:
+Copy-Item .\dist\subdisc-client.exe .\dist\kledisc.exe -Force
+.\dist\kledisc.exe
+```
+
+O script produz `dist\subdisc-client.exe`. A cópia acima usa o nome de distribuição `kledisc.exe`; ambos contêm o mesmo aplicativo e ícone. O arquivo original do Cargo fica em `target\release\subdisc-client.exe`.
+
+### Linux x86_64 — Bash
+
+```bash
+bash scripts/deps.sh && \
+  bash scripts/cargo.sh build --release --locked && \
+  ./target/release/subdisc-client
+```
+
+Saída: `target/release/subdisc-client`, um executável Linux nativo, sem extensão `.exe`. O nome interno do pacote Cargo foi preservado; a janela e os pacotes distribuídos usam **kledisc**.
+
+## Preparar o Windows para compilar
+
+1. Instale Git e clone o projeto numa pasta curta, como `C:\src\sub-disc-client`:
+
+   ```powershell
+   git clone --branch master https://github.com/GuilhermeGMV/sub-disc-client.git C:\src\sub-disc-client
+   Set-Location C:\src\sub-disc-client
+   ```
+
+2. Instale o [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) com **Desenvolvimento para desktop com C++**, compilador MSVC x64 e Windows SDK. O SDK fornece também o compilador de recursos usado para embutir o ícone do `.exe`.
+3. Instale Rust com [rustup](https://rustup.rs), usando a toolchain MSVC. Abra um novo PowerShell e confira:
+
+   ```powershell
+   rustup default stable-x86_64-pc-windows-msvc
+   rustc --version
+   cargo --version
+   ```
+
+4. Execute os comandos rápidos no topo. Se o linker `link.exe` ou o Windows SDK não for encontrado, confira a instalação do Build Tools e use o **Developer PowerShell for VS**.
+
+Não execute `scripts/deps.sh` no Windows: ele prepara dependências Linux. WSL compila a versão Linux, não o `.exe` Windows. Caminhos profundos dos headers WebRTC podem exceder o limite do Windows; use uma pasta curta se houver erro de caminho longo.
+
+O WebRTC e o runtime C são linkados estaticamente no Windows (`.cargo/config.toml`); não é preciso copiar DLLs do projeto ao lado do executável. Microfone e câmera precisam estar permitidos para aplicativos da área de trabalho nas configurações de privacidade do Windows.
+
+## Preparar o Linux para compilar
+
+A configuração de CI usa **Ubuntu 22.04 x86_64**. Os scripts de dependências são destinados a Debian/Ubuntu x86_64; outras distribuições podem precisar de adaptação. Não há pipeline de cliente ARM64 neste repositório.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  git build-essential pkg-config curl openssl ca-certificates xz-utils \
+  libglib2.0-dev libasound2-dev libudev-dev libxkbcommon-dev \
+  libwayland-dev libgl1-mesa-dev libssl-dev libclang-dev nasm python3
+```
+
+Instale Rust pelo [rustup](https://rustup.rs), carregue o ambiente da instalação no seu shell e selecione a toolchain estável:
+
+```bash
+rustup default stable
+rustc --version
+cargo --version
+git clone --branch master https://github.com/GuilhermeGMV/sub-disc-client.git
+cd sub-disc-client
+bash scripts/deps.sh
+bash scripts/cargo.sh build --release --locked
+./target/release/subdisc-client
+```
+
+Execute os comandos em sequência, prosseguindo somente se o anterior terminar sem erro. Não rode o build como `root`.
+
+`deps.sh` baixa para `.deps/` o Clang do Chromium compatível com o WebRTC usado pelo projeto e gera `.deps/env.sh`. O wrapper `scripts/cargo.sh` carrega esse ambiente antes do Cargo. Um Clang qualquer do sistema pode ter ABI incompatível; use o wrapper depois de preparar as dependências.
+
+Instalar `libglib2.0-dev` antes de rodar `deps.sh` faz o script usar os headers GLib do sistema. Isso evita o caminho alternativo de download de pacotes que pode falhar em distribuições sem candidato para `libsysprof-capture-4-dev`. `libclang-dev` é necessário para gerar os bindings V4L2 da webcam; `nasm` habilita otimizações de JPEG.
+
+O wrapper usa o Cargo do sistema ou, como alternativa, ferramentas em `../sub-disc/.tools`/`SUBDISC_TOOLS`. Uma instalação normal do rustup dispensa essa alternativa.
+
+### Executar no desktop Linux
+
+O aplicativo precisa de sessão gráfica X11 ou Wayland e das bibliotecas de desktop do sistema (GL/EGL, áudio, X11/Wayland). Para compartilhar tela no Wayland, são necessários **PipeWire, xdg-desktop-portal e o backend de portal compatível com seu desktop** (GNOME, KDE etc.). A webcam precisa de acesso ao dispositivo V4L2 e não pode estar ocupada por outro programa.
+
+Confira bibliotecas ausentes no binário:
+
+```bash
+ldd ./target/release/subdisc-client
+```
+
+Se aparecer `not found`, instale o pacote da sua distribuição que fornece a biblioteca indicada. Não execute o cliente gráfico com `sudo` para contornar permissões.
+
+### Montar uma pasta com nome, ícone e atalho
+
+Depois de compilar:
+
+```bash
+mkdir -p dist/kledisc-linux
+install -m 755 target/release/subdisc-client dist/kledisc-linux/kledisc
+cp assets/kledisc.png assets/kledisc.desktop assets/install-local.sh dist/kledisc-linux/
+./dist/kledisc-linux/kledisc
+```
+
+Para adicionar ao menu do usuário, opcionalmente:
+
+```bash
+cd dist/kledisc-linux
+bash install-local.sh
+```
+
+O instalador copia o binário para `~/.local/bin/kledisc`, o ícone e o arquivo `.desktop` para `${XDG_DATA_HOME:-$HOME/.local/share}`. Não requer `sudo`, mas requer Python 3. Para atualizar uma instalação feita assim, execute novamente o instalador a partir da pasta do novo pacote. Abrir diretamente `./kledisc` funciona sem instalar o atalho.
+
+## Baixar builds prontos
+
+Em [GitHub Actions](https://github.com/GuilhermeGMV/sub-disc-client/actions), abra **Windows and Linux executables (master)** e escolha uma execução concluída com sucesso no commit desejado. O workflow roda nos pushes que correspondem aos seus filtros e também por **Run workflow** na `master`.
+
+- **`kledisc-Windows-x64-livekit`**: o ZIP de download do Actions contém apenas `kledisc.exe`. Extraia e abra.
+- **`kledisc-Linux-x64-livekit`**: o download do Actions contém o `.tar.gz`, checksum e relatório de dependências. Extraia primeiro o download e depois:
+
+  ```bash
+  tar -xzf kledisc-Linux-x64-livekit.tar.gz
+  cd kledisc-Linux-x64-livekit
+  ./kledisc
+  # Opcional: bash install-local.sh
+  ```
+
+O `.tar.gz` preserva permissões de execução. Tags `v*` cujo commit pertence à `master` geram Releases depois que os dois builds e testes passam. O ZIP Windows da Release inclui também README e avisos de licença; não contém um segundo executável compactado. O artefato intermediário `kledisc-Windows-release-package` é usado somente em builds de tags para montar essa Release.
+
+## Configuração do cliente e conexão
+
+O cliente **não usa `.env`**, não precisa de Node.js nem de um LiveKit instalado na sua máquina. Na tela de entrada, informe o domínio do servidor de chat, por exemplo `chat.exemplo.com` (HTTPS é o padrão). Não informe o domínio `rtc`: o backend entrega a URL e o token LiveKit.
+
+- Para teste local, informe explicitamente `http://localhost:8080` se estiver usando o Compose de desenvolvimento.
+- Para internet, o servidor precisa de HTTPS/WSS válidos e portas de mídia acessíveis. A configuração de DNS, NAT, `.env` e TURN pertence ao [servidor](https://github.com/GuilhermeGMV/sub-disc#readme).
+- Permita as conexões de saída do aplicativo para HTTPS/WSS e para as portas de mídia anunciadas pelo servidor (na configuração padrão, UDP 7882 e TCP 7881; TURN quando habilitado). O cliente não precisa hospedar uma API nem encaminhar a porta 3000 no roteador.
+- Não coloque `LIVEKIT_API_SECRET` no cliente. A `SETUP_KEY` só é usada na criação do primeiro administrador.
+
+A sessão e preferências são salvas em `%APPDATA%\subdisc-client\config.json` no Windows e `$XDG_CONFIG_HOME/subdisc-client/config.json` no Linux, ou `~/.config/subdisc-client/config.json` se `XDG_CONFIG_HOME` estiver ausente. O caminho antigo foi mantido para preservar contas/configurações após a mudança de nome. O arquivo contém uma sessão de acesso; não o compartilhe.
 
 ## Funcionalidades
 
@@ -27,73 +165,6 @@ nativa e a mídia usa o WebRTC nativo do SDK oficial do LiveKit.
   Media Foundation no Windows e V4L2 no Linux; sair da chamada desliga a câmera.
 - Compartilhar a tela: no Wayland abre o seletor do sistema (portal + PipeWire);
   no X11 e no Windows oferece seleção explícita de monitores e janelas. Envio de áudio da tela e captura de abas ainda não são suportados.
-
-Plataformas: Linux x86_64 (testado) e Windows 10/11 x64 (código portado, ainda
-sem build validado).
-
-## Compilar (Linux x86_64)
-
-### Builds automáticos (Windows e Linux)
-
-Em **Actions > Windows and Linux executables (master)**, cada push de código na
-`master` gera dois artefatos; também é possível iniciar pelo **Run workflow**:
-
-- `kledisc-Windows-x64-livekit`: executável `.exe`, ZIP e checksum SHA-256.
-- `kledisc-Linux-x64-livekit`: pacote `.tar.gz`, checksum SHA-256 e relatório
-  das bibliotecas dinâmicas. Extraia com `tar -xzf kledisc-Linux-x64-livekit.tar.gz`
-  e execute `./kledisc-Linux-x64-livekit/subdisc-client`.
-
-O executável Linux é nativo (sem extensão `.exe`), compilado no Ubuntu 22.04
-para x86_64, e precisa das bibliotecas de desktop descritas abaixo. O pacote
-preserva a permissão de execução. Builds e testes precisam passar antes do
-upload de cada artefato; tags `v*` da `master` publicam os dois pacotes na mesma
-Release após ambas as plataformas passarem.
-
-Requisitos: Rust estável recente, `pkg-config`, `curl`, `openssl`, `dpkg-deb`,
-`libclang-dev` (bindings V4L2; `nasm` é opcional para acelerar o JPEG)
-e `apt-get` (Debian/Ubuntu).
-
-```bash
-scripts/deps.sh                    # uma vez: clang do Chromium + headers glib/gio em .deps/
-scripts/cargo.sh build --release --locked   # binário em target/release/subdisc-client
-target/release/subdisc-client
-```
-
-Por que `deps.sh`: o libwebrtc pré-compilado que o crate `webrtc-sys` baixa usa
-a libc++ do Chromium e exige clang ≥ 21 com a mesma ABI. O script baixa o clang
-exato do Chromium (conferindo o MD5 publicado) e os headers do glib via
-`apt-get download`, sem precisar de sudo. Tudo fica em `.deps/` (ignorado pelo git).
-
-`scripts/cargo.sh` usa o `cargo` do sistema ou, se não houver, o toolchain local
-do repositório do servidor (`../sub-disc/.tools`, ou `SUBDISC_TOOLS`), e carrega
-`.deps/env.sh`.
-
-Em tempo de execução são carregadas bibliotecas comuns do desktop: libGL/EGL,
-Wayland ou X11, PulseAudio e, para compartilhar tela no Wayland, PipeWire e
-xdg-desktop-portal.
-
-## Compilar (Windows 10/11 x64)
-
-1. Instale o [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/)
-   com a carga **Desenvolvimento para desktop com C++** (MSVC e Windows SDK).
-2. Instale o Rust por [rustup](https://rustup.rs) com a toolchain padrão (MSVC).
-3. Num PowerShell, na pasta do projeto:
-
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File scripts\build-windows.ps1
-   ```
-
-   O executável fica em `dist\subdisc-client.exe`. Ele é autocontido: o
-   libwebrtc é linkado estaticamente e o runtime C também (`.cargo/config.toml`),
-   então não precisa do VC++ Redistributable nem de DLLs ao lado.
-
-No Windows não é preciso o `deps.sh` nem o clang do Chromium; o build usa o MSVC.
-Se aparecer erro de caminho longo, coloque o projeto num caminho curto (ex.:
-`C:\src\subdisc-client`) ou habilite caminhos longos no Windows. Na primeira
-chamada o Windows pode pedir permissão de microfone (Configurações > Privacidade
-> Microfone > permitir apps da área de trabalho) e o firewall pode perguntar
-sobre acesso à rede: permita em redes privadas e públicas para a mídia
-WebRTC funcionar. A configuração fica em `%APPDATA%\subdisc-client\config.json`.
 
 ## Uso
 
