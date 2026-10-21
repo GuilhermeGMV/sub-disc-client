@@ -1,4 +1,4 @@
-name: Windows executable (master)
+name: Windows and Linux executables (master)
 # LiveKit/WebRTC is statically linked on master; no GStreamer SDK is needed.
 on:
   push:
@@ -11,7 +11,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: windows-master-${{ github.ref }}
+  group: executables-master-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 jobs:
   package:
@@ -89,8 +89,84 @@ jobs:
             dist/SHA256SUMS.txt
           if-no-files-found: error
 
+  linux:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/') && '0' || '1' }}
+      - name: Require master
+        env:
+          BUILD_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$BUILD_REF" == refs/heads/master ]]; then exit 0; fi
+          [[ "$BUILD_REF" == refs/tags/v* ]] || { echo 'Select master or a v* tag from master.' >&2; exit 1; }
+          git fetch --no-tags origin master
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+      - name: Install native build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config curl openssl xz-utils \
+            libglib2.0-dev libasound2-dev libudev-dev libxkbcommon-dev \
+            libwayland-dev libgl1-mesa-dev libssl-dev
+      - name: Rust stable
+        id: rust
+        run: |
+          rustup update stable
+          rustup default stable
+          echo "version=$(rustc -V | tr ' ()' '---')" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium Clang
+        uses: actions/cache@v4
+        with:
+          path: .deps/clang
+          key: clang-linux-x64-${{ hashFiles('scripts/deps.sh') }}
+      - name: Prepare LiveKit build environment
+        run: bash scripts/deps.sh
+      - name: Cache Cargo downloads and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-linux-22.04-master-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'vendor/**', 'scripts/deps.sh') }}
+          restore-keys: |
+            cargo-linux-22.04-master-${{ steps.rust.outputs.version }}-
+      - name: Build Linux executable with LiveKit
+        run: bash scripts/cargo.sh build --release --locked
+      - name: Rust tests
+        run: bash scripts/cargo.sh test --release --locked
+      - name: Package executable and notices
+        run: |
+          set -euo pipefail
+          package=dist/Subdisc-Linux-x64-livekit
+          mkdir -p "$package/licenses"
+          install -m 755 target/release/subdisc-client "$package/subdisc-client"
+          cp README.md "$package/README.md"
+          cp vendor/webrtc-sys/NOTICE.md "$package/licenses/WebRTC-NOTICE.md"
+          while IFS= read -r -d '' license; do
+            name=${license#vendor/}
+            cp "$license" "$package/licenses/${name//\//-}"
+          done < <(find vendor -type f -name 'LICENSE*' -print0)
+          file "$package/subdisc-client"
+          ldd "$package/subdisc-client" | tee dist/linux-dependencies.txt
+          if grep -q 'not found' dist/linux-dependencies.txt; then exit 1; fi
+          tar -czf dist/Subdisc-Linux-x64-livekit.tar.gz -C dist Subdisc-Linux-x64-livekit
+          (cd dist && sha256sum Subdisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Subdisc-Linux-x64-livekit
+          path: |
+            dist/Subdisc-Linux-x64-livekit.tar.gz
+            dist/linux-dependencies.txt
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
   release:
-    needs: package
+    needs: [package, linux]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -101,18 +177,23 @@ jobs:
         with:
           name: Subdisc-Windows-x64-livekit
           path: release
+      - uses: actions/download-artifact@v4
+        with:
+          name: Subdisc-Linux-x64-livekit
+          path: linux-release
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          cp linux-release/Subdisc-Linux-x64-livekit.tar.gz release/
           cd release
-          files=(Subdisc-Windows-x64-livekit.zip SHA256SUMS.txt)
+          sha256sum Subdisc-Windows-x64-livekit.zip Subdisc-Linux-x64-livekit.tar.gz > SHA256SUMS.txt
+          files=(Subdisc-Windows-x64-livekit.zip Subdisc-Linux-x64-livekit.tar.gz SHA256SUMS.txt)
           if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
           else
             gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "Subdisc $TAG (Windows x64 LiveKit)" --generate-notes
+              --title "Subdisc $TAG (Windows e Linux x64 LiveKit)" --generate-notes
           fi
-

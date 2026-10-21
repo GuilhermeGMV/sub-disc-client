@@ -24,6 +24,22 @@ sem build validado).
 
 ## Compilar (Linux x86_64)
 
+### Builds automáticos (Windows e Linux)
+
+Em **Actions > Windows and Linux executables (master)**, cada push de código na
+`master` gera dois artefatos; também é possível iniciar pelo **Run workflow**:
+
+- `Subdisc-Windows-x64-livekit`: executável `.exe`, ZIP e checksum SHA-256.
+- `Subdisc-Linux-x64-livekit`: pacote `.tar.gz`, checksum SHA-256 e relatório
+  das bibliotecas dinâmicas. Extraia com `tar -xzf Subdisc-Linux-x64-livekit.tar.gz`
+  e execute `./Subdisc-Linux-x64-livekit/subdisc-client`.
+
+O executável Linux é nativo (sem extensão `.exe`), compilado no Ubuntu 22.04
+para x86_64, e precisa das bibliotecas de desktop descritas abaixo. O pacote
+preserva a permissão de execução. Builds e testes precisam passar antes do
+upload de cada artefato; tags `v*` da `master` publicam os dois pacotes na mesma
+Release após ambas as plataformas passarem.
+
 Requisitos: Rust estável recente, `pkg-config`, `curl`, `openssl`, `dpkg-deb`
 e `apt-get` (Debian/Ubuntu).
 
