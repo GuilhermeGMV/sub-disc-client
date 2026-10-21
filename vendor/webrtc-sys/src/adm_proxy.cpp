@@ -30,6 +30,23 @@
 
 namespace livekit_ffi {
 
+namespace {
+
+// On Windows WebRTC (media/engine/adm_helpers.cc) selects the default
+// communication devices. Streams opened through the eCommunications role are
+// communication streams, and the default Windows ducking lowers every other
+// application (80% unless changed in the Sound control panel) while they are
+// open, e.g. a Discord call fades when a call starts here. The default console
+// devices are the ones the user chose in Windows and are not ducking triggers.
+webrtc::AudioDeviceModule::WindowsDeviceType WithoutDucking(
+    webrtc::AudioDeviceModule::WindowsDeviceType device) {
+  return device == webrtc::AudioDeviceModule::kDefaultCommunicationDevice
+             ? webrtc::AudioDeviceModule::kDefaultDevice
+             : device;
+}
+
+}  // namespace
+
 AdmProxy::AdmProxy(const webrtc::Environment& env, webrtc::Thread* worker_thread)
     : env_(env),
       worker_thread_(worker_thread) {
@@ -422,6 +439,7 @@ int32_t AdmProxy::SetPlayoutDevice(uint16_t index) {
 }
 
 int32_t AdmProxy::SetPlayoutDevice(WindowsDeviceType device) {
+  device = WithoutDucking(device);
   return RunOnWorker([this, device] {
     RTC_DCHECK_RUN_ON(worker_thread_);
     selected_playout_device_ = DeviceSelection(device);
@@ -444,6 +462,7 @@ int32_t AdmProxy::SetRecordingDevice(uint16_t index) {
 }
 
 int32_t AdmProxy::SetRecordingDevice(WindowsDeviceType device) {
+  device = WithoutDucking(device);
   return RunOnWorker([this, device] {
     RTC_DCHECK_RUN_ON(worker_thread_);
     selected_recording_device_ = DeviceSelection(device);

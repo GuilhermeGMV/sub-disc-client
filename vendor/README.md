@@ -20,6 +20,12 @@ Alterações locais:
   segura no track Rust. Usada apenas nos `RemoteAudioTrack` recebidos.
 - `libwebrtc/src/desktop_capturer.rs`: `start_capture` retorna `false` se
   `select_source` falhar, sem iniciar a captura de uma possível fonte padrão.
+- `webrtc-sys/src/adm_proxy.cpp`: no Windows o WebRTC (`adm_helpers::Init`)
+  pede os dispositivos padrão de *comunicação*; o proxy troca o pedido pelos
+  dispositivos padrão do sistema (papel console). Streams abertos pelo papel de
+  comunicação ativam a atenuação do Windows ("reduzir o volume de outros sons
+  em 80%"), que abaixava os outros apps, como uma chamada do Discord, ao entrar
+  em uma chamada. Dispositivo escolhido nas configurações (GUID) não muda.
 
 O header efetivamente compilado pelo SDK confirma `SetVolume` com faixa [0,10]
 e fonte remota; a aplicação restringe a [0,1.5]. A operação chega ao ganho do
