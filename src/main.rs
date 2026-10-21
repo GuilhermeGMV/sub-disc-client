@@ -6,12 +6,14 @@ mod api;
 mod audio;
 mod backend;
 mod bridge;
+mod camera;
 mod capture;
 mod config;
 mod demo;
 mod model;
 mod screen;
 mod ui;
+mod ui_camera;
 mod ui_capture;
 mod voice;
 mod ws;
@@ -19,6 +21,27 @@ mod ws;
 use bridge::{Frames, UiSink};
 
 fn main() -> eframe::Result {
+    if std::env::args().nth(1).as_deref() == Some("--list-cameras") {
+        match camera::list_devices() {
+            Ok(devices) => println!("{}", serde_json::to_string(&devices).unwrap()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return Ok(());
+    }
+    if let Some(encoded) = std::env::args()
+        .nth(1)
+        .filter(|arg| arg == "--camera-worker")
+        .and_then(|_| std::env::args().nth(2))
+    {
+        if let Err(error) = camera::worker(&encoded) {
+            eprintln!("{error}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let demo = std::env::args().any(|arg| arg == "--demo" || arg == "--dev-ui");
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("warn,subdisc_client=info"),

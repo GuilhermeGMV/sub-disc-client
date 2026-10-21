@@ -22,6 +22,9 @@ nativa e a mídia usa o WebRTC nativo do SDK oficial do LiveKit.
   ganho automático e supressão de ruído configuráveis; escolha de microfone e
   saída; silenciar o microfone, silenciar todo o áudio recebido e ajustar voz/tela de cada pessoa entre 0% e 150%.
 - Ver as telas compartilhadas (e câmeras) dos outros, ampliar e tela cheia (Esc sai).
+- Ligar/desligar a webcam durante a chamada, escolher ou trocar o dispositivo
+  em **Ligar câmera → Câmera** e acompanhar a prévia local. A captura nativa usa
+  Media Foundation no Windows e V4L2 no Linux; sair da chamada desliga a câmera.
 - Compartilhar a tela: no Wayland abre o seletor do sistema (portal + PipeWire);
   no X11 e no Windows oferece seleção explícita de monitores e janelas. Envio de áudio da tela e captura de abas ainda não são suportados.
 
@@ -46,7 +49,8 @@ preserva a permissão de execução. Builds e testes precisam passar antes do
 upload de cada artefato; tags `v*` da `master` publicam os dois pacotes na mesma
 Release após ambas as plataformas passarem.
 
-Requisitos: Rust estável recente, `pkg-config`, `curl`, `openssl`, `dpkg-deb`
+Requisitos: Rust estável recente, `pkg-config`, `curl`, `openssl`, `dpkg-deb`,
+`libclang-dev` (bindings V4L2; `nasm` é opcional para acelerar o JPEG)
 e `apt-get` (Debian/Ubuntu).
 
 ```bash
@@ -250,6 +254,8 @@ reconecte, troque a saída, remova a janela/monitor e encerre a chamada durante 
 portal. Confirme que nenhuma fonte padrão é capturada quando a seleção falha.
 
 Linux requer sessão gráfica para abrir a janela; Wayland requer portal e
-PipeWire. Windows usa os mesmos bindings de ganho e os capturadores nativos,
-mas precisa de validação de execução no próprio Windows. Não há webcam local
-nova nesta alteração; a recepção de câmeras existente foi preservada.
+PipeWire para compartilhar a tela. A webcam requer acesso ao dispositivo V4L2
+no Linux ou permissão de câmera para aplicativos desktop no Windows.
+Câmeras ocupadas, removidas ou sem permissão exibem erro; o cliente não troca
+automaticamente para outro dispositivo. A câmera e a tela podem ser publicadas
+simultaneamente. O demo usa apenas frames sintéticos, sem abrir dispositivos.

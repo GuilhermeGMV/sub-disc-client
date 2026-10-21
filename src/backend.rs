@@ -261,6 +261,15 @@ impl Backend {
             Command::StartScreen(request) => self.voice_cmd(VoiceCmd::StartScreen(request)),
             Command::DemoState(_) | Command::DemoError => {}
             Command::StopScreen => self.voice_cmd(VoiceCmd::StopScreen),
+            Command::ListCameras => {
+                let ui = self.ui.clone();
+                tokio::spawn(async move {
+                    let result = crate::camera::enumerate().await;
+                    ui.send(Event::Cameras(result));
+                });
+            }
+            Command::StartCamera(device) => self.voice_cmd(VoiceCmd::StartCamera(device)),
+            Command::StopCamera => self.voice_cmd(VoiceCmd::StopCamera),
             Command::ListDevices => {
                 self.platform_audio();
             }

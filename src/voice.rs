@@ -3,9 +3,11 @@
 //! recebe vídeos/telas e compartilha a tela.
 use crate::api::Api;
 use crate::audio::{AudioKind, Playback, Volume, Volumes, user_of};
+use crate::bridge::Device;
 use crate::bridge::{
     Event, Frames, ParticipantView, RgbaFrame, TileView, UiSink, VoiceStatus, VoiceView,
 };
+use crate::camera::CameraShare;
 use crate::capture::ShareRequest;
 use crate::model::MediaEvent;
 use crate::screen::ScreenShare;
@@ -32,6 +34,8 @@ pub enum VoiceCmd {
     },
     StartScreen(ShareRequest),
     StopScreen,
+    StartCamera(Device),
+    StopCamera,
     Leave,
 }
 
@@ -66,6 +70,11 @@ struct Session {
     status: VoiceStatus,
     muted: bool,
     screen: Option<ScreenShare>,
+    camera: Option<CameraShare>,
+    camera_pending: bool,
+    camera_generation: u64,
+    camera_cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    camera_tx: mpsc::UnboundedSender<(u64, Result<CameraShare, String>)>,
     /// Seletor de tela aberto; o resultado chega por `screen_rx` sem travar o laço.
     screen_pending: bool,
     screen_jobs: tokio::task::JoinSet<()>,
@@ -85,13 +94,16 @@ async fn run(setup: VoiceSetup, mut rx: mpsc::UnboundedReceiver<VoiceCmd>) {
         deafened: setup.deafened,
         screen: false,
         screen_pending: false,
+        camera: false,
+        camera_pending: false,
         share_video: false,
         share_audio: false,
         participants: vec![],
         tiles: vec![],
     })));
     let (screen_tx, mut screen_rx) = mpsc::unbounded_channel();
-    let (mut session, mut events) = match connect(setup, screen_tx).await {
+    let (camera_tx, mut camera_rx) = mpsc::unbounded_channel();
+    let (mut session, mut events) = match connect(setup, screen_tx, camera_tx).await {
         Ok(v) => v,
         Err(e) => {
             ui.error(e);
@@ -107,7 +119,7 @@ async fn run(setup: VoiceSetup, mut rx: mpsc::UnboundedReceiver<VoiceCmd>) {
         tokio::select! {
             _ = tick.tick() => {
                 session.apply_audio();
-                if !session.screen.as_ref().is_some_and(|share| share.finished()) {
+                if !session.screen.as_ref().is_some_and(|share| share.finished()) && !session.camera.as_ref().is_some_and(|share| share.finished()) {
                     continue;
                 }
             }
@@ -130,6 +142,12 @@ async fn run(setup: VoiceSetup, mut rx: mpsc::UnboundedReceiver<VoiceCmd>) {
                     Err(e) => session.setup.ui.error(e),
                 }
             }
+            Some((generation, result)) = camera_rx.recv() => {
+                if generation != session.camera_generation { continue; }
+                session.camera_cancel.take();
+                session.camera_pending = false;
+                match result { Ok(camera) => session.camera = Some(camera), Err(e) => session.setup.ui.error(e) }
+            }
             cmd = rx.recv() => match cmd {
                 Some(VoiceCmd::Leave) | None => break,
                 Some(cmd) => session.command(cmd).await,
@@ -145,6 +163,7 @@ type ScreenResult = Result<ScreenShare, String>;
 async fn connect(
     setup: VoiceSetup,
     screen_tx: mpsc::UnboundedSender<(u64, ScreenResult)>,
+    camera_tx: mpsc::UnboundedSender<(u64, Result<CameraShare, String>)>,
 ) -> Result<(Session, mpsc::UnboundedReceiver<RoomEvent>), String> {
     let join = setup
         .api
@@ -188,6 +207,11 @@ async fn connect(
         status: VoiceStatus::Connected,
         muted: false,
         screen: None,
+        camera: None,
+        camera_pending: false,
+        camera_generation: 0,
+        camera_cancel: None,
+        camera_tx,
         screen_pending: false,
         screen_jobs: tokio::task::JoinSet::new(),
         screen_cancel: None,
@@ -326,8 +350,36 @@ impl Session {
                     let _ = tx.send((generation, result));
                 });
             }
+            VoiceCmd::StartCamera(device) => {
+                if self.camera_pending {
+                    return;
+                }
+                self.stop_camera().await;
+                self.camera_pending = true;
+                let generation = self.camera_generation;
+                let (local, tx) = (self.room.local_participant(), self.camera_tx.clone());
+                let (frames, ui) = (self.setup.frames.clone(), self.setup.ui.clone());
+                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                self.camera_cancel = Some(cancel_tx);
+                self.screen_jobs.spawn(async move {
+                    let result = CameraShare::start(local, device, frames, ui, cancel_rx).await;
+                    let _ = tx.send((generation, result));
+                });
+            }
+            VoiceCmd::StopCamera => self.stop_camera().await,
             VoiceCmd::StopScreen => self.stop_screen().await,
             VoiceCmd::Leave => {}
+        }
+    }
+
+    async fn stop_camera(&mut self) {
+        self.camera_generation = self.camera_generation.wrapping_add(1);
+        if let Some(cancel) = self.camera_cancel.take() {
+            let _ = cancel.send(());
+        }
+        self.camera_pending = false;
+        if let Some(camera) = self.camera.take() {
+            camera.close().await;
         }
     }
 
@@ -350,6 +402,12 @@ impl Session {
             self.setup
                 .ui
                 .error("A captura foi encerrada ou a fonte ficou indisponível.");
+        }
+        if self.camera.as_ref().is_some_and(|camera| camera.finished()) {
+            self.camera.take();
+            self.setup
+                .ui
+                .error("A câmera foi desconectada ou parou de enviar vídeo.");
         }
         let local = self.room.local_participant();
         let mut participants = vec![ParticipantView {
@@ -388,6 +446,14 @@ impl Session {
         }
         participants[1..].sort_by(|a, b| a.name.cmp(&b.name));
         let mut tiles: Vec<TileView> = self.videos.values().map(|(_, tile)| tile.clone()).collect();
+        if let Some(camera) = &self.camera {
+            tiles.push(TileView {
+                key: camera.key.clone(),
+                name: "Você · câmera".into(),
+                screen: false,
+                user: user_of(&local.identity().to_string()).into(),
+            });
+        }
         tiles.sort_by(|a, b| (b.screen, &a.name).cmp(&(a.screen, &b.name)));
         self.setup.ui.send(Event::Voice(Some(VoiceView {
             channel: self.setup.channel.clone(),
@@ -396,6 +462,8 @@ impl Session {
             deafened: self.setup.deafened,
             screen: self.screen.is_some(),
             screen_pending: self.screen_pending,
+            camera: self.camera.is_some(),
+            camera_pending: self.camera_pending,
             share_video: self.screen.is_some(),
             share_audio: false,
             participants,
@@ -406,7 +474,7 @@ impl Session {
             kind: "media",
             lease: &self.lease,
             muted: self.muted,
-            camera: false,
+            camera: self.camera.is_some(),
             screen: self.screen.is_some(),
         };
         self.setup
@@ -415,6 +483,7 @@ impl Session {
     }
 
     async fn close(mut self) {
+        self.stop_camera().await;
         self.stop_screen().await;
         for (_, (task, _)) in self.videos.drain() {
             task.abort();

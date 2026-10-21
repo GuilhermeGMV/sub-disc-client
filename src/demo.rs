@@ -192,6 +192,8 @@ impl Demo {
             deafened: false,
             screen: false,
             screen_pending: false,
+            camera: false,
+            camera_pending: false,
             share_video: false,
             share_audio: false,
             participants,
@@ -230,6 +232,28 @@ impl Demo {
             Command::LeaveVoice => {
                 self.voice = None;
                 self.snapshot.voice.retain(|p| p.user_id != "demo-0");
+            }
+            Command::ListCameras => events.push(Event::Cameras(Ok(vec![crate::bridge::Device {
+                id: "demo-camera".into(),
+                name: "Câmera simulada".into(),
+            }]))),
+            Command::StartCamera(_) => {
+                if let Some(v) = &mut self.voice {
+                    v.camera = true;
+                    v.tiles.retain(|t| t.key != "demo-local-camera");
+                    v.tiles.push(TileView {
+                        key: "demo-local-camera".into(),
+                        name: "Você · câmera".into(),
+                        screen: false,
+                        user: "demo-0".into(),
+                    });
+                }
+            }
+            Command::StopCamera => {
+                if let Some(v) = &mut self.voice {
+                    v.camera = false;
+                    v.tiles.retain(|t| t.key != "demo-local-camera");
+                }
             }
             Command::SetMuted(muted) => {
                 if let Some(v) = &mut self.voice {
@@ -489,6 +513,38 @@ mod tests {
             demo.command(Command::StopScreen);
             assert!(!demo.voice.as_ref().unwrap().screen);
         }
+    }
+
+    #[test]
+    fn camera_and_screen_are_independent_and_leave_clears_preview() {
+        let mut demo = Demo::new();
+        let frames = Frames::default();
+        let devices = demo.command(Command::ListCameras);
+        let device = devices
+            .into_iter()
+            .find_map(|e| match e {
+                Event::Cameras(Ok(devices)) => devices.into_iter().next(),
+                _ => None,
+            })
+            .unwrap();
+        demo.command(Command::StartScreen(crate::capture::ShareRequest {
+            source: sources()[0].clone(),
+            video: true,
+            audio: false,
+        }));
+        demo.command(Command::StartCamera(device.clone()));
+        demo.animate(&frames);
+        assert!(demo.voice.as_ref().unwrap().camera);
+        assert!(frames.lock().unwrap().contains_key("demo-local-camera"));
+        demo.command(Command::StopCamera);
+        demo.animate(&frames);
+        assert!(!demo.voice.as_ref().unwrap().camera);
+        assert!(demo.voice.as_ref().unwrap().screen);
+        assert!(!frames.lock().unwrap().contains_key("demo-local-camera"));
+        demo.command(Command::StartCamera(device));
+        demo.command(Command::LeaveVoice);
+        demo.animate(&frames);
+        assert!(frames.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

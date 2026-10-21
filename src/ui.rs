@@ -79,6 +79,7 @@ pub struct App {
     demo: bool,
     share: ShareDialog,
     admin: crate::admin_ui::AdminPanel,
+    camera: crate::ui_camera::CameraDialog,
 }
 
 impl App {
@@ -97,6 +98,7 @@ impl App {
             demo,
             share: ShareDialog::default(),
             admin: crate::admin_ui::AdminPanel::default(),
+            camera: crate::ui_camera::CameraDialog::default(),
             cmd,
             events,
             frames,
@@ -147,6 +149,7 @@ impl App {
 
     fn handle(&mut self, event: Event) {
         match event {
+            Event::Cameras(result) => self.camera.receive(result),
             Event::AdminFinished(result) => self.admin.finish(result),
             Event::Sources { request, result } => self.share.receive(request, result),
             Event::Probed { needs_setup } => {
@@ -237,6 +240,7 @@ impl App {
                     self.view = View::Call;
                 }
                 if voice.is_none() {
+                    self.camera.open = false;
                     self.share.open = false;
                     self.view = View::Chat;
                     self.expanded = None;
@@ -555,6 +559,27 @@ impl App {
                 .clicked()
             {
                 self.send(Command::SetDeafened(!voice.deafened));
+            }
+            let camera_label = if voice.camera_pending {
+                "Cancelar câmera"
+            } else if voice.camera {
+                "Desligar câmera"
+            } else {
+                "Ligar câmera"
+            };
+            if ui.selectable_label(voice.camera, camera_label).clicked() {
+                if voice.camera || voice.camera_pending {
+                    self.send(Command::StopCamera);
+                } else {
+                    self.camera.open = true;
+                    let command = self.camera.refresh();
+                    self.send(command);
+                }
+            }
+            if voice.camera && ui.small_button("Dispositivo de câmera").clicked() {
+                self.camera.open = true;
+                let command = self.camera.refresh();
+                self.send(command);
             }
             let screen = if voice.screen_pending {
                 "Cancelar captura"
@@ -1076,6 +1101,14 @@ impl eframe::App for App {
                     self.demo,
                 ) {
                     self.send(command);
+                }
+                if let Some(voice) = &self.voice {
+                    if let Some(command) =
+                        self.camera
+                            .show(ui.ctx(), voice.camera, voice.camera_pending)
+                    {
+                        self.send(command);
+                    }
                 }
                 if self.audio.open {
                     self.audio_window(&ui.ctx().clone());

@@ -51,6 +51,9 @@ pub enum Command {
     StartScreen(crate::capture::ShareRequest),
     StopScreen,
     ListDevices,
+    ListCameras,
+    StartCamera(Device),
+    StopCamera,
     SelectMic(String),
     SelectSpeaker(String),
     SetProcessing {
@@ -97,13 +100,15 @@ pub struct VoiceView {
     pub deafened: bool,
     pub screen: bool,
     pub screen_pending: bool,
+    pub camera: bool,
+    pub camera_pending: bool,
     pub share_video: bool,
     pub share_audio: bool,
     pub participants: Vec<ParticipantView>,
     pub tiles: Vec<TileView>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Device {
     pub id: String,
     pub name: String,
@@ -111,6 +116,7 @@ pub struct Device {
 
 pub enum Event {
     AdminFinished(Result<(), String>),
+    Cameras(Result<Vec<Device>, String>),
     Sources {
         request: u64,
         result: Result<Vec<crate::capture::CaptureSourceInfo>, String>,

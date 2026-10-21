@@ -110,7 +110,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config curl openssl xz-utils \
             libglib2.0-dev libasound2-dev libudev-dev libxkbcommon-dev \
-            libwayland-dev libgl1-mesa-dev libssl-dev
+            libwayland-dev libgl1-mesa-dev libssl-dev libclang-dev nasm
       - name: Rust stable
         id: rust
         run: |
