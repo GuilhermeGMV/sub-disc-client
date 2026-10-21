@@ -5,7 +5,7 @@ use crate::config::Config;
 use crate::model::{ChannelKind, ChatMessage, Snapshot, User};
 use crate::ui_capture::ShareDialog;
 use eframe::egui::{self, Color32, RichText, TextureHandle, TextureOptions, Vec2};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedSender;
@@ -74,6 +74,7 @@ pub struct App {
     voice: Option<VoiceView>,
     view: View,
     expanded: Option<String>,
+    hidden_videos: HashSet<(String, bool)>,
     fullscreen: bool,
     audio: AudioSettings,
     demo: bool,
@@ -125,6 +126,7 @@ impl App {
             voice: None,
             view: View::Chat,
             expanded: None,
+            hidden_videos: HashSet::new(),
             fullscreen: false,
             audio: AudioSettings {
                 open: false,
@@ -176,6 +178,9 @@ impl App {
                 self.messages.clear();
                 self.selected = None;
                 self.voice = None;
+                self.hidden_videos.clear();
+                self.expanded = None;
+                self.textures.clear();
                 self.screen = Screen::Login;
                 if let Some(e) = error {
                     self.show_error(e);
@@ -236,6 +241,10 @@ impl App {
                 merge(self.messages.entry(channel).or_default(), messages);
             }
             Event::Voice(voice) => {
+                if self.voice.as_ref().map(|v| &v.channel) != voice.as_ref().map(|v| &v.channel) {
+                    self.hidden_videos.clear();
+                    self.expanded = None;
+                }
                 if voice.is_some() && self.voice.is_none() {
                     self.view = View::Call;
                 }
@@ -695,14 +704,43 @@ impl App {
         });
     }
 
+    fn video_hidden(&self, tile: &crate::bridge::TileView) -> bool {
+        self.hidden_videos
+            .contains(&(tile.user.clone(), tile.screen))
+    }
+
+    fn set_video_hidden(&mut self, tile: &crate::bridge::TileView, hidden: bool) {
+        let key = (tile.user.clone(), tile.screen);
+        if hidden {
+            self.hidden_videos.insert(key);
+            self.textures.remove(&tile.key);
+            if self.expanded.as_deref() == Some(tile.key.as_str()) {
+                self.expanded = None;
+            }
+        } else {
+            self.hidden_videos.remove(&key);
+        }
+    }
+
+    fn remote_video(&self, tile: &crate::bridge::TileView) -> bool {
+        !self.user.as_ref().is_some_and(|user| user.id == tile.user)
+    }
+
     fn call(&mut self, ui: &mut egui::Ui) {
         let Some(voice) = self.voice.clone() else {
             return;
         };
+        if self.expanded.is_none() && self.fullscreen {
+            self.set_fullscreen(ui.ctx(), false);
+        }
         self.update_textures(ui.ctx(), &voice);
         egui::CentralPanel::default().show(ui, |ui| {
             if let Some(key) = self.expanded.clone() {
-                if let Some(tile) = voice.tiles.iter().find(|t| t.key == key) {
+                if let Some(tile) = voice
+                    .tiles
+                    .iter()
+                    .find(|t| t.key == key && !self.video_hidden(t))
+                {
                     ui.horizontal(|ui| {
                         ui.label(format!(
                             "{} · {}",
@@ -713,6 +751,10 @@ impl App {
                                 "Câmera"
                             }
                         ));
+                        if self.remote_video(tile) && ui.button("Ocultar vídeo").clicked() {
+                            self.set_video_hidden(tile, true);
+                            self.set_fullscreen(ui.ctx(), false);
+                        }
                         if ui.button("Reduzir").clicked() {
                             self.expanded = None;
                             self.set_fullscreen(ui.ctx(), false);
@@ -727,6 +769,9 @@ impl App {
                             self.set_fullscreen(ui.ctx(), full);
                         }
                     });
+                    if self.video_hidden(tile) {
+                        return;
+                    }
                     self.tile_volume(ui, &voice, &tile.user, tile.screen);
                     let size = ui.available_size();
                     self.video(ui, &key, size);
@@ -760,13 +805,50 @@ impl App {
                         );
                         ui.add_space(6.0);
                     }
-                    if !voice.tiles.is_empty() {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label("Vídeos dos participantes:");
+                        if ui.button("Ocultar todos").clicked() {
+                            for tile in &voice.tiles {
+                                if self.remote_video(tile) {
+                                    self.set_video_hidden(tile, true);
+                                }
+                            }
+                        }
+                        if !self.hidden_videos.is_empty()
+                            && ui.button("Ver todos novamente").clicked()
+                        {
+                            self.hidden_videos.clear();
+                        }
+                    });
+                    for tile in &voice.tiles {
+                        if self.video_hidden(tile) {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!(
+                                    "{} · {} oculto",
+                                    tile.name,
+                                    if tile.screen {
+                                        "Compartilhamento"
+                                    } else {
+                                        "Vídeo da câmera"
+                                    }
+                                ));
+                                if ui.button("Ver novamente").clicked() {
+                                    self.set_video_hidden(tile, false);
+                                }
+                            });
+                        }
+                    }
+                    let visible: Vec<_> = voice
+                        .tiles
+                        .iter()
+                        .filter(|t| !self.video_hidden(t))
+                        .collect();
+                    if !visible.is_empty() {
                         let width = ui.available_width();
-                        let columns =
-                            ((width / 260.0).floor() as usize).clamp(1, voice.tiles.len());
+                        let columns = ((width / 260.0).floor() as usize).clamp(1, visible.len());
                         let tile_width = (width - 10.0 * (columns as f32 - 1.0)) / columns as f32;
                         let tile_size = Vec2::new(tile_width, tile_width * 9.0 / 16.0);
-                        for row in voice.tiles.chunks(columns) {
+                        for row in visible.chunks(columns) {
                             ui.horizontal(|ui| {
                                 for tile in row {
                                     ui.vertical(|ui| {
@@ -786,6 +868,11 @@ impl App {
                                             ))
                                             .small(),
                                         );
+                                        if self.remote_video(tile)
+                                            && ui.small_button("Ocultar vídeo").clicked()
+                                        {
+                                            self.set_video_hidden(tile, true);
+                                        }
                                         self.tile_volume(ui, &voice, &tile.user, tile.screen);
                                     });
                                 }
@@ -930,10 +1017,17 @@ impl App {
 
     /// Envia à GPU só os frames novos e descarta texturas de faixas encerradas.
     fn update_textures(&mut self, ctx: &egui::Context, voice: &VoiceView) {
-        self.textures
-            .retain(|key, _| voice.tiles.iter().any(|t| &t.key == key));
+        self.textures.retain(|key, _| {
+            voice
+                .tiles
+                .iter()
+                .any(|t| &t.key == key && !self.hidden_videos.contains(&(t.user.clone(), t.screen)))
+        });
         let frames = self.frames.lock().unwrap();
         for tile in &voice.tiles {
+            if self.video_hidden(tile) {
+                continue;
+            }
             let Some(frame) = frames.get(&tile.key) else {
                 continue;
             };
@@ -1204,6 +1298,47 @@ fn volume_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hiding_video_preserves_audio_and_other_sources_and_resets_on_leave() {
+        let (cmd, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (_, events) = mpsc::channel();
+        let (fixture, frames) = crate::demo::ui_fixture();
+        let mut app = App::new(cmd, events, frames, true);
+        for event in fixture {
+            app.handle(event);
+        }
+        while commands.try_recv().is_ok() {}
+        let voice = app.voice.clone().unwrap();
+        let tile = voice.tiles[0].clone();
+        let mut other_source = tile.clone();
+        other_source.screen = !tile.screen;
+        let ctx = egui::Context::default();
+        app.update_textures(&ctx, &voice);
+        app.expanded = Some(tile.key.clone());
+        app.set_video_hidden(&tile, true);
+        assert!(app.expanded.is_none());
+        assert!(!app.textures.contains_key(&tile.key));
+        assert!(!app.video_hidden(&other_source));
+        let mut republished = tile.clone();
+        republished.key = "new-track".into();
+        assert!(app.video_hidden(&republished));
+        app.handle(Event::Voice(Some(voice.clone())));
+        app.update_textures(&ctx, &voice);
+        assert!(app.video_hidden(&tile));
+        assert!(!app.textures.contains_key(&tile.key));
+        assert!(
+            commands.try_recv().is_err(),
+            "Hiding must not mute audio or stop publications"
+        );
+        app.set_video_hidden(&tile, false);
+        assert!(!app.video_hidden(&tile));
+        app.update_textures(&ctx, &voice);
+        assert!(app.textures.contains_key(&tile.key));
+        app.set_video_hidden(&tile, true);
+        app.handle(Event::Voice(None));
+        assert!(app.hidden_videos.is_empty());
+    }
 
     #[test]
     fn saved_account_waits_for_the_server_without_asking_the_password() {

@@ -259,3 +259,5 @@ no Linux ou permissão de câmera para aplicativos desktop no Windows.
 Câmeras ocupadas, removidas ou sem permissão exibem erro; o cliente não troca
 automaticamente para outro dispositivo. A câmera e a tela podem ser publicadas
 simultaneamente. O demo usa apenas frames sintéticos, sem abrir dispositivos.
+
+Durante a chamada, use **Ocultar vídeo** em uma câmera ou tela compartilhada e **Ver novamente** para restaurá-la. Também é possível ocultar ou restaurar todos os vídeos recebidos. A escolha é local, dura até sair da chamada e não altera o áudio nem a transmissão dos outros participantes. Vídeos ocultos continuam sendo recebidos, mas não são exibidos.
