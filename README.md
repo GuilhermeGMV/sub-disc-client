@@ -9,6 +9,11 @@ sem transcodificação. Não há navegador embutido.
 
 - Login, instalação inicial e convites; sessão persistente com permissão 0600.
 - Chat, histórico paginado, presença e exclusividade de chamada por conta.
+- Painel **Administração** para contas `admin`: criar/editar usuários, redefinir
+  senhas, atribuir `admin`/`member`, apagar contas, tirar participantes de chamadas
+  e criar canais de voz ou texto. Requer o backend atualizado no repositório
+  `../sub-disc`; as permissões são verificadas pelo servidor. O último admin é
+  protegido. Apagar conta também apaga suas mensagens e convites.
 - Microfone, mute/deafen, escolha de entrada/saída e AEC/AGC/supressão de ruído.
 - Volumes independentes de voz e som da tela, entre 0% e 150%, persistentes por
   servidor e usuário. A mistura recebida fornece a referência do cancelador de eco.

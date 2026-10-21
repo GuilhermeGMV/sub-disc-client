@@ -58,6 +58,7 @@ impl Demo {
         .iter()
         .enumerate()
         .map(|(i, name)| User {
+            role: if i == 0 { "admin" } else { "member" }.into(),
             id: format!("demo-{i}"),
             username: (*name).into(),
         })
@@ -319,6 +320,9 @@ impl Demo {
                     "SIMULAÇÃO: configuração aplicada apenas em memória.".into(),
                 ));
             }
+            Command::Admin { .. } => events.push(Event::AdminFinished(Err(
+                "Administração indisponível no demo offline.".into(),
+            ))),
             Command::Probe { .. } | Command::Login { .. } => {}
         }
         if let Some(v) = &self.voice

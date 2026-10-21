@@ -7,6 +7,8 @@ use serde::Serialize;
 pub struct User {
     pub id: String,
     pub username: String,
+    #[serde(default = "member_role")]
+    pub role: String,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
@@ -119,6 +121,15 @@ mod tests {
     }
 
     #[test]
+    fn user_role_is_read_and_older_servers_default_to_member() {
+        let admin: User =
+            serde_json::from_str(r#"{"id":"u","username":"ana","role":"admin"}"#).unwrap();
+        assert_eq!(admin.role, "admin");
+        let legacy: User = serde_json::from_str(r#"{"id":"u","username":"ana"}"#).unwrap();
+        assert_eq!(legacy.role, "member");
+    }
+
+    #[test]
     fn media_event_matches_contract() {
         let event = MediaEvent {
             v: 1,
@@ -133,4 +144,8 @@ mod tests {
             r#"{"v":1,"type":"media","lease":"l","muted":true,"camera":false,"screen":false}"#
         );
     }
+}
+
+fn member_role() -> String {
+    "member".into()
 }

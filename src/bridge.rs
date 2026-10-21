@@ -10,6 +10,11 @@ pub enum LoginMode {
 }
 
 pub enum Command {
+    Admin {
+        method: reqwest::Method,
+        path: String,
+        body: Option<serde_json::Value>,
+    },
     /// Testa o servidor e informa se ele ainda precisa do primeiro administrador.
     Probe {
         server: String,
@@ -105,6 +110,7 @@ pub struct Device {
 }
 
 pub enum Event {
+    AdminFinished(Result<(), String>),
     Sources {
         request: u64,
         result: Result<Vec<crate::capture::CaptureSourceInfo>, String>,
