@@ -1,0 +1,118 @@
+name: Windows executable (master)
+# LiveKit/WebRTC is statically linked on master; no GStreamer SDK is needed.
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+    paths:
+      - '**'
+      - '!**.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-master-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: ${{ startsWith(github.ref, 'refs/tags/') && '0' || '1' }}
+      - name: Require master
+        shell: powershell
+        env:
+          BUILD_REF: ${{ github.ref }}
+        run: |
+          if ($env:BUILD_REF -eq 'refs/heads/master') { exit 0 }
+          if ($env:BUILD_REF -notlike 'refs/tags/v*') { throw 'Select master or a v* tag from master.' }
+          git fetch --no-tags origin master
+          if ($LASTEXITCODE) { throw 'Cannot fetch master.' }
+          git merge-base --is-ancestor HEAD FETCH_HEAD
+          if ($LASTEXITCODE) { throw 'The tag does not point to a commit of master.' }
+      - name: Rust MSVC
+        id: rust
+        shell: powershell
+        run: |
+          rustup update stable
+          if ($LASTEXITCODE) { throw 'rustup failed' }
+          rustup default stable
+          if ($LASTEXITCODE) { throw 'rustup default failed' }
+          rustup target add x86_64-pc-windows-msvc
+          if ($LASTEXITCODE) { throw 'rustup target failed' }
+          $release = rustc -V
+          if ($LASTEXITCODE) { throw 'rustc failed' }
+          "version=$($release -replace '[^0-9A-Za-z.]+','-')" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+      - name: Cache Cargo downloads and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-windows-master-${{ steps.rust.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'vendor/**') }}
+          restore-keys: |
+            cargo-windows-master-${{ steps.rust.outputs.version }}-
+      - name: Build Windows executable with LiveKit
+        shell: powershell
+        run: ./scripts/build-windows.ps1
+      - name: Rust tests
+        shell: powershell
+        run: |
+          cargo test --release --locked
+          if ($LASTEXITCODE) { throw "cargo test failed: $LASTEXITCODE" }
+      - name: Package executable and notices
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = 'dist/Subdisc-Windows-x64-livekit'
+          New-Item -ItemType Directory -Force "$package/licenses" | Out-Null
+          Copy-Item dist/subdisc-client.exe "$package/subdisc-client.exe"
+          Copy-Item README.md "$package/README.md"
+          Copy-Item vendor/webrtc-sys/NOTICE.md "$package/licenses/WebRTC-NOTICE.md"
+          Get-ChildItem vendor -Recurse -File -Filter 'LICENSE*' | ForEach-Object {
+            $name = $_.FullName.Substring((Join-Path (Get-Location) 'vendor').Length + 1) -replace '[\\/]', '-'
+            Copy-Item $_.FullName "$package/licenses/$name"
+          }
+          Compress-Archive -Path "$package/*" -DestinationPath dist/Subdisc-Windows-x64-livekit.zip -Force
+          $hash = (Get-FileHash dist/Subdisc-Windows-x64-livekit.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  Subdisc-Windows-x64-livekit.zip" | Out-File dist/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Subdisc-Windows-x64-livekit
+          path: |
+            dist/subdisc-client.exe
+            dist/Subdisc-Windows-x64-livekit.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+
+  release:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Subdisc-Windows-x64-livekit
+          path: release
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          cd release
+          files=(Subdisc-Windows-x64-livekit.zip SHA256SUMS.txt)
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "Subdisc $TAG (Windows x64 LiveKit)" --generate-notes
+          fi
+
