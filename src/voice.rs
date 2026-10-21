@@ -19,7 +19,7 @@ use livekit::prelude::*;
 use livekit::webrtc::native::yuv_helper;
 use livekit::webrtc::video_frame::VideoBuffer;
 use livekit::webrtc::video_stream::native::NativeVideoStream;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -394,8 +394,35 @@ impl Session {
         }
     }
 
+    /// Web camera toggles can mute a publication without unsubscribing it.
+    /// Reconcile on room events, including mute/unmute and reconnect, so the
+    /// last received frame never represents a camera that has been turned off.
+    fn sync_remote_videos(&mut self) {
+        let mut active = HashMap::new();
+        for participant in self.room.remote_participants().into_values() {
+            for publication in participant.track_publications().into_values() {
+                if !publication.is_muted() {
+                    if let Some(RemoteTrack::Video(video)) = publication.track() {
+                        active.insert(video.sid().to_string(), (video, participant.clone()));
+                    }
+                }
+            }
+        }
+        prune_remote_videos(
+            &mut self.videos,
+            &self.setup.frames,
+            &active.keys().cloned().collect(),
+        );
+        for (key, (video, participant)) in active {
+            if !self.videos.contains_key(&key) {
+                self.attach(RemoteTrack::Video(video), &participant);
+            }
+        }
+    }
+
     /// Atualiza a interface e o estado de mídia enviado ao servidor.
     fn publish(&mut self) {
+        self.sync_remote_videos();
         // A captura pode ter terminado sozinha (portal cancelado, janela fechada).
         if self.screen.as_ref().is_some_and(|share| share.finished()) {
             self.screen.take();
@@ -544,5 +571,74 @@ async fn receive_video(track: RemoteVideoTrack, key: String, frames: Frames, ui:
             spare = previous.data;
         }
         ui.repaint();
+    }
+}
+
+/// Remove both reception and cached pixels, preserving unrelated media.
+fn prune_remote_videos(
+    videos: &mut HashMap<String, (JoinHandle<()>, TileView)>,
+    frames: &Frames,
+    active: &HashSet<String>,
+) {
+    videos.retain(|key, (task, _)| {
+        if active.contains(key) {
+            return true;
+        }
+        task.abort();
+        frames.lock().unwrap().remove(key);
+        false
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn disabled_remote_camera_removes_tile_and_frame_but_keeps_screen() {
+        let frames = Frames::default();
+        let mut videos = HashMap::new();
+        let mut aborts = Vec::new();
+        for (key, screen) in [("camera", false), ("screen", true)] {
+            let task = tokio::spawn(std::future::pending::<()>());
+            aborts.push(task.abort_handle());
+            videos.insert(
+                key.into(),
+                (
+                    task,
+                    TileView {
+                        key: key.into(),
+                        user: "participant".into(),
+                        name: "Participant".into(),
+                        screen,
+                    },
+                ),
+            );
+            frames.lock().unwrap().insert(
+                key.into(),
+                RgbaFrame {
+                    width: 1,
+                    height: 1,
+                    data: vec![0, 0, 0, 255],
+                    seq: 1,
+                },
+            );
+        }
+        let active = HashSet::from(["screen".into()]);
+        prune_remote_videos(&mut videos, &frames, &active);
+        tokio::task::yield_now().await;
+        assert!(aborts[0].is_finished());
+        assert!(!aborts[1].is_finished());
+        assert!(!videos.contains_key("camera"));
+        assert!(!frames.lock().unwrap().contains_key("camera"));
+        assert!(videos.contains_key("screen"));
+        assert!(frames.lock().unwrap().contains_key("screen"));
+        // Repeated mute notifications are harmless; a missing SID can be
+        // attached afresh on unmute, even if the publication SID is unchanged.
+        prune_remote_videos(&mut videos, &frames, &active);
+        assert_eq!(videos.len(), 1);
+        prune_remote_videos(&mut videos, &frames, &HashSet::new());
+        assert!(videos.is_empty());
+        assert!(frames.lock().unwrap().is_empty());
     }
 }
