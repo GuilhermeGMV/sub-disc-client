@@ -152,6 +152,29 @@ impl IActivateAudioInterfaceCompletionHandler_Impl for Activation_Impl {
     }
 }
 
+/// `VT_BLOB` que aponta para `params`, sem copiar. O `PROPVARIANT` do crate
+/// `windows` chama `PropVariantClear` no `Drop`, que faria `CoTaskMemFree` do
+/// ponteiro de pilha e corromperia o heap (0xC0000374): por isso `ManuallyDrop`.
+/// O blob não aloca nada, então não há o que liberar.
+fn blob_variant(params: &mut AUDIOCLIENT_ACTIVATION_PARAMS) -> ManuallyDrop<PROPVARIANT> {
+    ManuallyDrop::new(PROPVARIANT {
+        Anonymous: PROPVARIANT_0 {
+            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
+                vt: VT_BLOB,
+                wReserved1: 0,
+                wReserved2: 0,
+                wReserved3: 0,
+                Anonymous: PROPVARIANT_0_0_0 {
+                    blob: BLOB {
+                        cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
+                        pBlobData: params as *mut _ as *mut u8,
+                    },
+                },
+            }),
+        },
+    })
+}
+
 fn activate(target: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<IAudioClient, AudioError> {
     let mut params = AUDIOCLIENT_ACTIVATION_PARAMS {
         ActivationType: AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK,
@@ -162,30 +185,14 @@ fn activate(target: u32, mode: PROCESS_LOOPBACK_MODE) -> Result<IAudioClient, Au
             },
         },
     };
-    // VT_BLOB apontando para `params` na pilha: sem PropVariantClear.
-    let variant = PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_BLOB,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 {
-                    blob: BLOB {
-                        cbSize: size_of::<AUDIOCLIENT_ACTIVATION_PARAMS>() as u32,
-                        pBlobData: &mut params as *mut _ as *mut u8,
-                    },
-                },
-            }),
-        },
-    };
+    let variant = blob_variant(&mut params);
     let (tx, rx) = mpsc::sync_channel(1);
     let handler: IActivateAudioInterfaceCompletionHandler = Activation(tx).into();
     let _operation = unsafe {
         ActivateAudioInterfaceAsync(
             VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
             &IAudioClient::IID,
-            Some(&variant),
+            Some(&*variant),
             &handler,
         )
     }
@@ -367,5 +374,23 @@ impl LoopbackStream for Stream {
 impl Drop for Stream {
     fn drop(&mut self) {
         let _ = unsafe { self.client.Stop() };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regressão do 0xC0000374: criar e descartar o parâmetro de ativação
+    /// nunca libera o blob de pilha. Com o bug, o processo de teste aborta.
+    #[test]
+    fn activation_blob_is_never_freed() {
+        for _ in 0..1_000 {
+            let mut params = AUDIOCLIENT_ACTIVATION_PARAMS::default();
+            let variant = blob_variant(&mut params);
+            assert_eq!(unsafe { variant.Anonymous.Anonymous.vt }, VT_BLOB);
+            // `variant` sai de escopo aqui sem PropVariantClear.
+            let _heap_still_usable = vec![0u8; 4096];
+        }
     }
 }
