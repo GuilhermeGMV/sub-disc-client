@@ -14,6 +14,7 @@ use livekit::webrtc::audio_source::AudioSourceOptions;
 use livekit::webrtc::audio_source::native::NativeAudioSource;
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -39,7 +40,7 @@ const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(not(windows))]
 const UNSUPPORTED: &str = "Envio de áudio do compartilhamento disponível só no Windows. No Linux, a captura via PulseAudio/PipeWire ainda não foi implementada; o vídeo e o microfone continuam funcionando.";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AudioError {
     NoOutputDevice,
     Unsupported(String),
@@ -71,6 +72,227 @@ pub fn availability() -> AudioAvailability {
     #[cfg(not(windows))]
     {
         Err(UNSUPPORTED.into())
+    }
+}
+
+/// Argumento do modo subprocesso (ver [`worker`]).
+pub const WORKER_ARG: &str = "--screen-audio-worker";
+const TAG_READY: u8 = 0;
+const TAG_ERROR: u8 = 1;
+const TAG_FRAME: u8 = 2;
+const MAX_ERROR_LEN: u32 = 64 * 1024;
+
+/// Como [`run`], mas a captura nativa roda num subprocesso deste executável:
+/// uma falha no driver/COM derruba só o subprocesso, e o app mostra o erro.
+/// O subprocesso é encerrado em `stop` e morre sozinho se o app fechar (a
+/// escrita no pipe falha).
+pub fn run_isolated(
+    scope: AudioScope,
+    window: Option<u64>,
+    stop: &AtomicBool,
+    ready: impl FnOnce(Result<(), AudioError>),
+    sink: &mut dyn FnMut(&[i16]),
+) -> Result<(), AudioError> {
+    if cfg!(not(windows)) {
+        // Sem captura nativa: recusa sem criar processo.
+        return run(scope, window, stop, ready, sink);
+    }
+    let exe = std::env::current_exe()
+        .map_err(|e| AudioError::Start(format!("executável não encontrado ({e})")))?;
+    let mut command = std::process::Command::new(exe);
+    command.arg(WORKER_ARG).arg(match scope {
+        AudioScope::System => "system",
+        AudioScope::Application => "application",
+    });
+    if let Some(window) = window {
+        command.arg(window.to_string());
+    }
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut command, 0x0800_0000);
+    let mut ready = Some(ready);
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            let error = AudioError::Start(format!(
+                "não foi possível abrir o processo de captura ({e})"
+            ));
+            if let Some(ready) = ready.take() {
+                ready(Err(error.clone()));
+            }
+            return Err(error);
+        }
+    };
+    log::info!("áudio da tela: subprocesso {} iniciado", child.id());
+    let mut output = child.stdout.take().expect("stdout em pipe");
+    let child = std::sync::Mutex::new(child);
+    let finished = AtomicBool::new(false);
+    let result = std::thread::scope(|scope| {
+        // Parar fecha o subprocesso; a leitura bloqueada recebe EOF.
+        scope.spawn(|| {
+            while !stop.load(Ordering::Acquire) && !finished.load(Ordering::Acquire) {
+                std::thread::park_timeout(Duration::from_millis(20));
+            }
+            let _ = child.lock().unwrap().kill();
+        });
+        let result = relay(&mut output, &mut ready, sink);
+        finished.store(true, Ordering::Release);
+        result
+    });
+    let mut child = child.into_inner().unwrap();
+    let _ = child.kill();
+    let status = child.wait().ok();
+    if stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    let error = result.err().unwrap_or_else(|| {
+        let code = status.and_then(|s| s.code());
+        log::error!("áudio da tela: subprocesso terminou sem aviso, código {code:?}");
+        AudioError::Start(format!(
+            "o processo de captura de áudio terminou inesperadamente ({})",
+            describe_exit(code)
+        ))
+    });
+    if let Some(ready) = ready.take() {
+        ready(Err(error.clone()));
+    }
+    Err(error)
+}
+
+fn describe_exit(code: Option<i32>) -> String {
+    let Some(code) = code else {
+        return "sem código de saída".into();
+    };
+    let name = match code as u32 {
+        0xC000_0005 => " — violação de acesso",
+        0xC000_0409 => " — falha rápida/abort",
+        0xC000_00FD => " — estouro de pilha",
+        _ => "",
+    };
+    format!("código 0x{:08X}{name}", code as u32)
+}
+
+/// Lê o protocolo do subprocesso. `Ok` = EOF sem erro explícito (processo
+/// encerrado ou morto); `Err` = erro relatado pelo próprio subprocesso.
+fn relay<F: FnOnce(Result<(), AudioError>)>(
+    input: &mut impl Read,
+    ready: &mut Option<F>,
+    sink: &mut dyn FnMut(&[i16]),
+) -> Result<(), AudioError> {
+    let mut bytes = [0u8; FRAME_LEN * 2];
+    let mut frame = [0i16; FRAME_LEN];
+    loop {
+        let mut tag = [0u8];
+        if input.read_exact(&mut tag).is_err() {
+            return Ok(());
+        }
+        match tag[0] {
+            TAG_READY => {
+                if let Some(ready) = ready.take() {
+                    ready(Ok(()));
+                }
+            }
+            TAG_FRAME => {
+                if input.read_exact(&mut bytes).is_err() {
+                    return Ok(());
+                }
+                for (sample, pair) in frame.iter_mut().zip(bytes.as_chunks::<2>().0) {
+                    *sample = i16::from_le_bytes(*pair);
+                }
+                sink(&frame);
+            }
+            TAG_ERROR => {
+                let mut len = [0u8; 4];
+                if input.read_exact(&mut len).is_err() {
+                    return Ok(());
+                }
+                let len = u32::from_le_bytes(len);
+                if len > MAX_ERROR_LEN {
+                    return Err(AudioError::Start(
+                        "resposta inválida do processo de captura".into(),
+                    ));
+                }
+                let mut message = vec![0; len as usize];
+                if input.read_exact(&mut message).is_err() {
+                    return Ok(());
+                }
+                return Err(serde_json::from_slice(&message).unwrap_or_else(|_| {
+                    AudioError::Start("resposta inválida do processo de captura".into())
+                }));
+            }
+            _ => {
+                return Err(AudioError::Start(
+                    "resposta inválida do processo de captura".into(),
+                ));
+            }
+        }
+    }
+}
+
+fn write_error(output: &mut impl Write, error: &AudioError) -> std::io::Result<()> {
+    let message = serde_json::to_vec(error).unwrap_or_default();
+    output.write_all(&[TAG_ERROR])?;
+    output.write_all(&(message.len() as u32).to_le_bytes())?;
+    output.write_all(&message)?;
+    output.flush()
+}
+
+/// Lado do subprocesso: `--screen-audio-worker system|application [janela]`.
+/// Chamado só pelo app depois de um Iniciar compartilhamento explícito.
+pub fn worker(args: &[String]) -> i32 {
+    let scope = match args.first().map(String::as_str) {
+        Some("system") => AudioScope::System,
+        Some("application") => AudioScope::Application,
+        _ => return 2,
+    };
+    let window = args.get(1).and_then(|w| w.parse().ok());
+    let stdout = std::io::stdout();
+    serve(scope, window, &mut stdout.lock())
+}
+
+fn serve(scope: AudioScope, window: Option<u64>, output: &mut impl Write) -> i32 {
+    let stop = AtomicBool::new(false);
+    let output = std::cell::RefCell::new(output);
+    let reported = std::cell::Cell::new(false);
+    let ready = |result: Result<(), AudioError>| {
+        reported.set(result.is_err());
+        let mut output = output.borrow_mut();
+        let sent = match &result {
+            Ok(()) => output.write_all(&[TAG_READY]).and_then(|()| output.flush()),
+            Err(error) => write_error(&mut *output, error),
+        };
+        if sent.is_err() {
+            stop.store(true, Ordering::Release);
+        }
+    };
+    let mut bytes = [0u8; 1 + FRAME_LEN * 2];
+    bytes[0] = TAG_FRAME;
+    let mut sink = |frame: &[i16]| {
+        for (pair, sample) in bytes[1..].as_chunks_mut::<2>().0.iter_mut().zip(frame) {
+            *pair = sample.to_le_bytes();
+        }
+        let mut output = output.borrow_mut();
+        // App fechado ou captura parada: o pipe fecha e o subprocesso termina.
+        if output
+            .write_all(&bytes)
+            .and_then(|()| output.flush())
+            .is_err()
+        {
+            stop.store(true, Ordering::Release);
+        }
+    };
+    match run(scope, window, &stop, ready, &mut sink) {
+        Ok(()) => 0,
+        Err(error) => {
+            log::warn!("áudio da tela (subprocesso): {}", error.message());
+            if !reported.get() {
+                let _ = write_error(&mut *output.borrow_mut(), &error);
+            }
+            1
+        }
     }
 }
 
@@ -744,6 +966,84 @@ mod tests {
         let mut sink = native_sink(source);
         for _ in 0..100 {
             sink(&[0; FRAME_LEN]);
+        }
+    }
+
+    #[test]
+    fn subprocess_protocol_relays_ready_frames_and_errors() {
+        // Fluxo gravado como o subprocesso escreveria: pronto, dois quadros, erro.
+        let mut stream = vec![TAG_READY];
+        for value in [1000i16, -2000] {
+            stream.push(TAG_FRAME);
+            for _ in 0..FRAME_LEN {
+                stream.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        write_error(&mut stream, &AudioError::Disconnected).unwrap();
+        let mut ready_seen = None;
+        let mut ready = Some(|r: Result<(), AudioError>| ready_seen = Some(r));
+        let mut frames = vec![];
+        let result = relay(&mut stream.as_slice(), &mut ready, &mut |f| {
+            frames.push(f[0])
+        });
+        assert_eq!(result, Err(AudioError::Disconnected));
+        assert!(ready.is_none());
+        assert_eq!(ready_seen, Some(Ok(())));
+        assert_eq!(frames, [1000, -2000]);
+
+        // Erro antes de pronto: `ready` fica para quem chamou repassar.
+        let mut stream = vec![];
+        write_error(&mut stream, &AudioError::NoOutputDevice).unwrap();
+        let mut ready = Some(|_: Result<(), AudioError>| panic!("não deve sinalizar"));
+        let result = relay(&mut stream.as_slice(), &mut ready, &mut |_| {});
+        assert_eq!(result, Err(AudioError::NoOutputDevice));
+        assert!(ready.is_some());
+
+        // Processo morto no meio de um quadro: EOF sem erro, quadro parcial descartado.
+        let mut stream = vec![TAG_READY, TAG_FRAME, 1, 2, 3];
+        let mut ready = Some(|_: Result<(), AudioError>| {});
+        let mut count = 0;
+        assert_eq!(
+            relay(&mut stream.as_slice(), &mut ready, &mut |_| count += 1),
+            Ok(())
+        );
+        assert_eq!(count, 0);
+        // Lixo e tamanho de erro absurdo são recusados sem alocar.
+        stream = vec![9];
+        assert!(
+            relay(
+                &mut stream.as_slice(),
+                &mut Some(|_: Result<(), AudioError>| {}),
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        stream = vec![TAG_ERROR, 0xff, 0xff, 0xff, 0xff];
+        assert!(
+            relay(
+                &mut stream.as_slice(),
+                &mut Some(|_: Result<(), AudioError>| {}),
+                &mut |_| {}
+            )
+            .is_err()
+        );
+        assert_eq!(
+            describe_exit(Some(0xC000_0005u32 as i32)),
+            "código 0xC0000005 — violação de acesso"
+        );
+    }
+
+    #[test]
+    fn worker_side_writes_the_protocol_and_rejects_bad_arguments() {
+        assert_eq!(worker(&["outro".into()]), 2);
+        assert_eq!(worker(&[]), 2);
+        // Fora do Windows o subprocesso relata "sem suporte" pelo próprio protocolo.
+        if cfg!(not(windows)) {
+            let mut output = vec![];
+            assert_eq!(serve(AudioScope::System, None, &mut output), 1);
+            let mut ready = Some(|_: Result<(), AudioError>| {});
+            let result = relay(&mut output.as_slice(), &mut ready, &mut |_| {});
+            assert!(matches!(result, Err(AudioError::Unsupported(_))));
         }
     }
 

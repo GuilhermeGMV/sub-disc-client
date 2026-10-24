@@ -107,6 +107,7 @@ pub fn availability() -> AudioAvailability {
 
 fn map_error(error: windows::core::Error) -> AudioError {
     let code = error.code();
+    log::warn!("WASAPI: {} (0x{:08X})", error.message(), code.0 as u32);
     if code == AUDCLNT_E_DEVICE_INVALIDATED || code == AUDCLNT_E_SERVICE_NOT_RUNNING {
         AudioError::Disconnected
     } else if code == E_ACCESSDENIED {
@@ -257,7 +258,13 @@ impl Stream {
                 )
             }
         };
+        log::info!(
+            "WASAPI: process loopback, build {}, alvo {target}, modo {:?}",
+            build(),
+            mode
+        );
         let client = activate(target, mode)?;
+        log::info!("WASAPI: ativação concluída");
         // O loopback por processo não informa formato de mixagem: pedimos o da
         // track e o Windows converte (AUTOCONVERTPCM). Float primeiro, PCM 16 depois.
         let flags = AUDCLNT_STREAMFLAGS_LOOPBACK
@@ -288,10 +295,12 @@ impl Stream {
         let Some(format) = chosen else {
             return Err(last_error.map_or(AudioError::Start("formato recusado".into()), map_error));
         };
+        log::info!("WASAPI: inicializado em {format:?} 48 kHz estéreo");
         let event = Event(unsafe { CreateEventW(None, false, false, None) }.map_err(map_error)?);
         unsafe { client.SetEventHandle(event.0) }.map_err(map_error)?;
         let capture: IAudioCaptureClient = unsafe { client.GetService() }.map_err(map_error)?;
         unsafe { client.Start() }.map_err(map_error)?;
+        log::info!("WASAPI: captura iniciada");
         Ok(Self {
             client,
             capture,

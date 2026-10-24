@@ -21,6 +21,55 @@ mod ws;
 
 use bridge::{Frames, UiSink};
 
+/// No Windows o release não tem console: o log vai para
+/// `%APPDATA%\subdisc-client\kledisc.log` (anterior em `kledisc.log.old`).
+/// Pânicos também são registrados, com local, antes do comportamento padrão.
+fn init_logging(role: &'static str) {
+    let mut builder = env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("warn,subdisc_client=info"),
+    );
+    builder.format(move |out, record| {
+        use std::io::Write;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        writeln!(
+            out,
+            "{}.{:03} [{role} {}] {} {}: {}",
+            now.as_secs(),
+            now.subsec_millis(),
+            std::process::id(),
+            record.level(),
+            record.target(),
+            record.args()
+        )
+    });
+    if cfg!(windows)
+        && role != "demo"
+        && let Some(dir) = config::dir()
+    {
+        let path = dir.join("kledisc.log");
+        let _ = std::fs::create_dir_all(&dir);
+        // Só o app principal gira o arquivo; o subprocesso de áudio acrescenta.
+        if role == "app" && std::fs::metadata(&path).is_ok_and(|m| m.len() > 2 * 1024 * 1024) {
+            let _ = std::fs::rename(&path, path.with_extension("log.old"));
+        }
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            builder.target(env_logger::Target::Pipe(Box::new(file)));
+        }
+    }
+    builder.init();
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log::error!("pânico: {info}");
+        default(info);
+    }));
+}
+
 fn main() -> eframe::Result {
     if std::env::args().nth(1).as_deref() == Some("--list-cameras") {
         match camera::list_devices() {
@@ -31,6 +80,11 @@ fn main() -> eframe::Result {
             }
         }
         return Ok(());
+    }
+    if std::env::args().nth(1).as_deref() == Some(system_audio::WORKER_ARG) {
+        init_logging("audio-worker");
+        let args: Vec<String> = std::env::args().skip(2).collect();
+        std::process::exit(system_audio::worker(&args));
     }
     if let Some(encoded) = std::env::args()
         .nth(1)
@@ -44,10 +98,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let demo = std::env::args().any(|arg| arg == "--demo" || arg == "--dev-ui");
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("warn,subdisc_client=info"),
-    )
-    .init();
+    init_logging(if demo { "demo" } else { "app" });
     // Poucas threads: o trabalho pesado de mídia roda nas threads do próprio WebRTC.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)

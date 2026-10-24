@@ -273,6 +273,11 @@ a track é retirada e a interface avisa; o vídeo continua. Se o vídeo terminar
 o áudio termina junto. Falhar ao iniciar ou publicar qualquer uma das partes
 cancela as duas: nada fica transmitindo sem aviso.
 
+A captura roda num subprocesso: se o driver de áudio falhar, o app continua e
+mostra o erro. No Windows o log fica em `%APPDATA%\subdisc-client\kledisc.log`
+(o anterior em `kledisc.log.old`), com as etapas do compartilhamento e
+eventuais pânicos; anexe-o ao relatar problemas.
+
 **Linux (X11/Wayland):** **Enviar áudio** fica desabilitado com o motivo no
 modal. Captura de monitor PulseAudio/PipeWire ainda não foi implementada. Em
 versões do Windows anteriores ao build 19041, ou sem dispositivo de saída, o

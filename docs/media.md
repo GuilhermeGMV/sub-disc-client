@@ -73,8 +73,13 @@ Recepção de `ScreenshareAudio` funciona em todos os sistemas, separada da voz.
    (`IMMDeviceEnumerator::GetDefaultAudioEndpoint`). Nada é capturado nesse passo.
 2. Ao clicar em **Iniciar compartilhamento**, a disponibilidade é verificada de
    novo, o vídeo é aberto e espera o primeiro frame; só então o áudio é aberto.
-3. A thread `screen-audio` (worker RAII, `capture::CaptureWorker`) inicializa COM
-   (MTA) e chama `ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK)`
+3. A thread `screen-audio` (worker RAII, `capture::CaptureWorker`) abre um
+   subprocesso do próprio executável (`--screen-audio-worker system|application
+   [janela]`), como já é feito com a câmera: uma falha no driver ou no COM
+   derruba só o subprocesso e o app mostra o erro com o código de saída. Os
+   quadros chegam por um pipe (byte de tipo + PCM i16); parar mata o
+   subprocesso, e ele termina sozinho se o app fechar. O subprocesso inicializa
+   COM (MTA) e chama `ActivateAudioInterfaceAsync(VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK)`
    com `AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK`:
    - **Todo o som**: `PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE` com o PID
      do próprio cliente. O ADM do WebRTC toca as vozes da chamada neste

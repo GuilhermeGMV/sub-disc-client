@@ -175,6 +175,12 @@ impl<P: Publisher> ScreenShare<P> {
         mut cancel: oneshot::Receiver<()>,
     ) -> Result<Self, String> {
         request.validate(&audio)?;
+        log::info!(
+            "compartilhamento: iniciando (vídeo: {}, áudio: {:?}, fonte: {:?})",
+            request.video,
+            request.audio,
+            request.source.as_ref().map(|s| (s.kind, s.id))
+        );
         let mut share = Self {
             video: None,
             audio: None,
@@ -194,8 +200,12 @@ impl<P: Publisher> ScreenShare<P> {
         }
         .await;
         match result {
-            Ok(()) => Ok(share),
+            Ok(()) => {
+                log::info!("compartilhamento: transmitindo");
+                Ok(share)
+            }
             Err(error) => {
+                log::warn!("compartilhamento: não iniciou: {error}");
                 share.close().await;
                 Err(error)
             }
@@ -225,6 +235,7 @@ impl<P: Publisher> ScreenShare<P> {
             Some(Err(error)) => return Err(error),
             None => return Err("O compartilhamento de tela não começou a tempo.".into()),
         }
+        log::info!("compartilhamento: primeiro frame de vídeo recebido");
         Ok(LocalTrack::Video(LocalVideoTrack::create_video_track(
             "screen",
             RtcVideoSource::Native(source),
@@ -247,7 +258,8 @@ impl<P: Publisher> ScreenShare<P> {
             let ready = |result: Result<(), system_audio::AudioError>| {
                 let _ = ready_tx.send(result.map_err(|e| e.message()));
             };
-            if let Err(error) = system_audio::run(scope, window, &stop, ready, &mut sink) {
+            if let Err(error) = system_audio::run_isolated(scope, window, &stop, ready, &mut sink) {
+                log::warn!("áudio da tela encerrado: {}", error.message());
                 *slot.lock().unwrap() = Some(error.message());
             }
         })?;
@@ -257,6 +269,7 @@ impl<P: Publisher> ScreenShare<P> {
             Some(Err(error)) => return Err(error),
             None => return Err("A captura de áudio não iniciou a tempo.".into()),
         }
+        log::info!("compartilhamento: captura de áudio pronta");
         Ok(LocalTrack::Audio(LocalAudioTrack::create_audio_track(
             "screen_audio",
             RtcAudioSource::Native(source),
@@ -274,6 +287,7 @@ impl<P: Publisher> ScreenShare<P> {
     ) -> Result<(), String> {
         let with_video = video.is_some();
         if let Some(track) = video {
+            log::info!("compartilhamento: publicando vídeo");
             let sid = publisher
                 .publish(track.clone(), video_options())
                 .await
@@ -287,6 +301,7 @@ impl<P: Publisher> ScreenShare<P> {
             cancelled(cancel)?;
         }
         if let Some(track) = audio {
+            log::info!("compartilhamento: publicando áudio");
             let sid = publisher
                 .publish(track.clone(), audio_options())
                 .await
