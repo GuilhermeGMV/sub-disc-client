@@ -252,10 +252,22 @@ impl Backend {
             Command::ListSources { request } => {
                 let ui = self.ui.clone();
                 tokio::spawn(async move {
-                    let result = tokio::task::spawn_blocking(crate::capture::enumerate)
-                        .await
-                        .unwrap_or_else(|_| Err("Falha ao listar as fontes de captura.".into()));
-                    ui.send(Event::Sources { request, result });
+                    let (result, audio) = tokio::task::spawn_blocking(|| {
+                        (
+                            crate::capture::enumerate(),
+                            crate::system_audio::availability(),
+                        )
+                    })
+                    .await
+                    .unwrap_or_else(|_| {
+                        let error = "Falha ao listar as fontes de captura.".to_owned();
+                        (Err(error.clone()), Err(error))
+                    });
+                    ui.send(Event::Sources {
+                        request,
+                        result,
+                        audio,
+                    });
                 });
             }
             Command::StartScreen(request) => self.voice_cmd(VoiceCmd::StartScreen(request)),

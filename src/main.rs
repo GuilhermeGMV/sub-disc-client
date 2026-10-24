@@ -12,6 +12,7 @@ mod config;
 mod demo;
 mod model;
 mod screen;
+mod system_audio;
 mod ui;
 mod ui_camera;
 mod ui_capture;

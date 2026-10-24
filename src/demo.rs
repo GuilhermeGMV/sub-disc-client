@@ -5,7 +5,7 @@ use crate::bridge::{
     Command, Device, Event, Frames, ParticipantView, RgbaFrame, TileView, UiSink, VoiceStatus,
     VoiceView,
 };
-use crate::capture::{CaptureKind, CaptureSourceInfo};
+use crate::capture::{AudioAvailability, AudioScope, AudioSupport, CaptureKind, CaptureSourceInfo};
 use crate::model::{Channel, ChannelKind, ChatMessage, Snapshot, User, VoicePresence};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -17,6 +17,14 @@ struct Demo {
     messages: HashMap<String, Vec<ChatMessage>>,
     next_id: i64,
     seq: u64,
+}
+
+/// Simulação: todos os modos aparecem habilitados e identificados como simulados.
+fn audio() -> AudioAvailability {
+    Ok(AudioSupport {
+        system: true,
+        application: true,
+    })
 }
 
 fn sources() -> Vec<CaptureSourceInfo> {
@@ -281,29 +289,42 @@ impl Demo {
             Command::ListSources { request } => events.push(Event::Sources {
                 request,
                 result: Ok(sources()),
+                audio: audio(),
             }),
             Command::StartScreen(request) => {
-                if let Err(error) = request.validate(true).and_then(|()| {
-                    crate::capture::selected(&sources(), &request.source).map(|_| ())
-                }) {
+                if let Err(error) =
+                    request
+                        .validate(&audio())
+                        .and_then(|()| match &request.source {
+                            Some(source) => {
+                                crate::capture::selected(&sources(), source).map(|_| ())
+                            }
+                            None => Ok(()),
+                        })
+                {
                     events.push(Event::Error(error));
                 } else if let Some(v) = &mut self.voice {
                     v.screen = true;
                     v.share_video = request.video;
-                    v.share_audio = request.audio;
+                    v.share_audio = request.audio.is_some();
                     v.tiles.retain(|t| t.key != "demo-local");
-                    v.participants[0].screen_audio = request.audio;
-                    if request.video {
+                    v.participants[0].screen_audio = request.audio.is_some();
+                    if let (true, Some(source)) = (request.video, &request.source) {
                         v.tiles.push(TileView {
                             key: "demo-local".into(),
-                            name: format!("{} · simulação", request.source.title),
+                            name: format!("{} · simulação", source.title),
                             screen: true,
                             user: "demo-0".into(),
                         });
                     }
+                    let audio = match request.audio {
+                        None => "desativado",
+                        Some(AudioScope::System) => "sistema",
+                        Some(AudioScope::Application) => "aplicativo",
+                    };
                     events.push(Event::Error(format!(
-                        "SIMULAÇÃO: transmissão iniciada (vídeo: {}, áudio: {}).",
-                        request.video, request.audio
+                        "SIMULAÇÃO: transmissão iniciada (vídeo: {}, áudio: {audio}).",
+                        request.video
                     )));
                 }
             }
@@ -501,14 +522,20 @@ mod tests {
     #[test]
     fn simulated_capture_modes_and_cleanup() {
         let mut demo = Demo::new();
-        for (video, audio) in [(true, true), (true, false), (false, true), (false, false)] {
+        for (video, audio) in [
+            (true, Some(AudioScope::System)),
+            (true, None),
+            (false, Some(AudioScope::System)),
+            (false, None),
+        ] {
             demo.command(Command::StartScreen(crate::capture::ShareRequest {
-                source: sources()[0].clone(),
+                source: Some(sources()[0].clone()),
                 video,
                 audio,
             }));
             let v = demo.voice.as_ref().unwrap();
-            assert_eq!(v.screen, video || audio);
+            assert_eq!(v.screen, video || audio.is_some());
+            assert_eq!(v.share_audio, audio.is_some());
             assert_eq!(v.tiles.iter().any(|t| t.key == "demo-local"), video);
             demo.command(Command::StopScreen);
             assert!(!demo.voice.as_ref().unwrap().screen);
@@ -528,9 +555,9 @@ mod tests {
             })
             .unwrap();
         demo.command(Command::StartScreen(crate::capture::ShareRequest {
-            source: sources()[0].clone(),
+            source: Some(sources()[0].clone()),
             video: true,
-            audio: false,
+            audio: None,
         }));
         demo.command(Command::StartCamera(device.clone()));
         demo.animate(&frames);

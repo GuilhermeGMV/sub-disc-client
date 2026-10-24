@@ -84,17 +84,16 @@ impl CameraDialog {
                         command = self.selected.clone().map(Command::StartCamera);
                     }
                 });
-                if active || pending {
-                    if ui
+                if (active || pending)
+                    && ui
                         .button(if pending {
                             "Cancelar abertura"
                         } else {
                             "Desligar câmera"
                         })
                         .clicked()
-                    {
-                        command = Some(Command::StopCamera);
-                    }
+                {
+                    command = Some(Command::StopCamera);
                 }
                 ui.label("A câmera só é aberta ao confirmar. Ao sair da chamada, ela é desligada.");
             });

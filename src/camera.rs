@@ -1,6 +1,7 @@
 //! Native camera capture runs in a child process so a stuck driver can always
 //! be stopped without blocking the UI or keeping the webcam open after Leave.
 use crate::bridge::{Device, Frames, RgbaFrame, UiSink};
+use crate::screen::Published;
 use livekit::webrtc::{
     native::yuv_helper,
     video_frame::{I420Buffer, VideoFrame, VideoRotation},
@@ -204,7 +205,7 @@ fn deliver(
 pub struct CameraShare {
     task: JoinHandle<()>,
     stop: Option<oneshot::Sender<()>>,
-    publication: Option<(LocalParticipant, TrackSid)>,
+    publication: Option<Published>,
     frames: Frames,
     pub key: String,
 }
@@ -233,11 +234,13 @@ impl CameraShare {
             },
             false,
         );
-        let track =
-            LocalVideoTrack::create_video_track("camera", RtcVideoSource::Native(source.clone()));
+        let track = LocalTrack::Video(LocalVideoTrack::create_video_track(
+            "camera",
+            RtcVideoSource::Native(source.clone()),
+        ));
         let publication = local
             .publish_track(
-                LocalTrack::Video(track),
+                track.clone(),
                 TrackPublishOptions {
                     source: TrackSource::Camera,
                     video_codec: VideoCodec::VP8,
@@ -252,8 +255,9 @@ impl CameraShare {
             .await
             .map_err(|e| format!("Falha ao publicar câmera: {e}"))?;
         let sid = publication.sid();
+        let published = Published::new(local, &track, sid.clone());
         if !matches!(cancel.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
-            let _ = local.unpublish_track(&sid).await;
+            published.unpublish().await;
             return Err("Câmera cancelada.".into());
         }
         let key = format!("local-camera-{sid}");
@@ -283,7 +287,7 @@ impl CameraShare {
         Ok(Self {
             task,
             stop: Some(stop),
-            publication: Some((local, sid)),
+            publication: Some(published),
             frames,
             key,
         })
@@ -296,8 +300,8 @@ impl CameraShare {
             let _ = stop.send(());
         }
         let _ = (&mut self.task).await;
-        if let Some((local, sid)) = self.publication.take() {
-            let _ = local.unpublish_track(&sid).await;
+        if let Some(publication) = self.publication.take() {
+            publication.unpublish().await;
         }
         self.frames.lock().unwrap().remove(&self.key);
     }
@@ -306,10 +310,8 @@ impl Drop for CameraShare {
     fn drop(&mut self) {
         self.task.abort();
         self.frames.lock().unwrap().remove(&self.key);
-        if let Some((local, sid)) = self.publication.take() {
-            tokio::spawn(async move {
-                let _ = local.unpublish_track(&sid).await;
-            });
+        if let Some(publication) = self.publication.take() {
+            publication.unpublish_later();
         }
     }
 }

@@ -19,11 +19,18 @@ impl CaptureWorker {
     pub fn spawn(
         run: impl FnOnce(Arc<AtomicBool>, Arc<AtomicBool>) + Send + 'static,
     ) -> Result<Self, String> {
+        Self::spawn_named("screen-capture", run)
+    }
+
+    pub fn spawn_named(
+        name: &str,
+        run: impl FnOnce(Arc<AtomicBool>, Arc<AtomicBool>) + Send + 'static,
+    ) -> Result<Self, String> {
         let stop = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
         let (stop_thread, done_thread) = (stop.clone(), done.clone());
         let thread = std::thread::Builder::new()
-            .name("screen-capture".into())
+            .name(name.into())
             .spawn(move || {
                 struct Finished(Arc<AtomicBool>);
                 impl Drop for Finished {
@@ -34,7 +41,7 @@ impl CaptureWorker {
                 let _finished = Finished(done_thread.clone());
                 run(stop_thread, done_thread);
             })
-            .map_err(|_| "Não foi possível iniciar a captura de tela.".to_owned())?;
+            .map_err(|_| "Não foi possível iniciar a captura.".to_owned())?;
         Ok(Self {
             stop,
             done,
@@ -90,22 +97,60 @@ pub struct CaptureSourceInfo {
     pub kind: CaptureKind,
 }
 
+/// Origem do áudio enviado junto com o compartilhamento. Capturar uma janela
+/// não restringe o som a ela: o escopo é escolhido separadamente.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioScope {
+    /// Tudo o que o sistema reproduz, exceto o próprio cliente (as vozes da chamada).
+    System,
+    /// Somente o processo dono da janela selecionada e seus subprocessos.
+    Application,
+}
+
+/// O que este cliente consegue capturar de áudio nesta máquina.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AudioSupport {
+    pub system: bool,
+    pub application: bool,
+}
+
+/// `Err` traz o motivo exibido no modal quando o envio de áudio está desabilitado.
+pub type AudioAvailability = Result<AudioSupport, String>;
+
 #[derive(Clone, Debug)]
 pub struct ShareRequest {
-    pub source: CaptureSourceInfo,
+    /// Monitor/janela. Dispensável só para áudio do sistema sem vídeo.
+    pub source: Option<CaptureSourceInfo>,
     pub video: bool,
-    pub audio: bool,
+    pub audio: Option<AudioScope>,
 }
 
 impl ShareRequest {
-    pub fn validate(&self, audio_available: bool) -> Result<(), String> {
-        if !self.video && !self.audio {
+    pub fn validate(&self, audio: &AudioAvailability) -> Result<(), String> {
+        if !self.video && self.audio.is_none() {
             return Err("Habilite vídeo ou áudio para compartilhar.".into());
         }
-        if self.audio && !audio_available {
-            return Err("Captura de áudio da tela indisponível neste cliente. O microfone continua independente.".into());
+        if self.video && self.source.is_none() {
+            return Err("Escolha uma tela ou janela para enviar vídeo.".into());
         }
-        Ok(())
+        let Some(scope) = self.audio else {
+            return Ok(());
+        };
+        let support = audio.as_ref().map_err(Clone::clone)?;
+        match scope {
+            AudioScope::System if !support.system => {
+                Err("Captura do áudio do sistema indisponível neste computador.".into())
+            }
+            AudioScope::Application if !support.application => {
+                Err("Captura do áudio de um aplicativo indisponível neste computador.".into())
+            }
+            AudioScope::Application
+                if self.source.as_ref().map(|s| s.kind) != Some(CaptureKind::Window) =>
+            {
+                Err("Para enviar só o áudio de um aplicativo, escolha uma janela.".into())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -212,18 +257,68 @@ mod tests {
 
     #[test]
     fn media_modes_match_capability() {
-        for (video, audio) in [(true, true), (true, false), (false, true), (false, false)] {
-            let request = ShareRequest {
-                source: CaptureSourceInfo {
-                    id: 1,
-                    title: "Tela".into(),
-                    kind: CaptureKind::Monitor,
-                },
-                video,
-                audio,
-            };
-            assert_eq!(request.validate(true).is_ok(), video || audio);
-            assert_eq!(request.validate(false).is_ok(), video && !audio);
+        let screen = CaptureSourceInfo {
+            id: 1,
+            title: "Tela".into(),
+            kind: CaptureKind::Monitor,
+        };
+        let window = CaptureSourceInfo {
+            id: 2,
+            title: "Player".into(),
+            kind: CaptureKind::Window,
+        };
+        let full: AudioAvailability = Ok(AudioSupport {
+            system: true,
+            application: true,
+        });
+        let none: AudioAvailability = Err("sem suporte neste SO".into());
+        let system_only: AudioAvailability = Ok(AudioSupport {
+            system: true,
+            application: false,
+        });
+        let request = |source: Option<&CaptureSourceInfo>, video, audio| ShareRequest {
+            source: source.cloned(),
+            video,
+            audio,
+        };
+        let scopes = [
+            None,
+            Some(AudioScope::System),
+            Some(AudioScope::Application),
+        ];
+        for video in [true, false] {
+            for audio in scopes {
+                let r = request(Some(&window), video, audio);
+                assert_eq!(r.validate(&full).is_ok(), video || audio.is_some());
+                assert_eq!(r.validate(&none).is_ok(), video && audio.is_none());
+                assert_eq!(
+                    r.validate(&system_only).is_ok(),
+                    (video || audio.is_some()) && audio != Some(AudioScope::Application)
+                );
+            }
+        }
+        // O motivo da indisponibilidade chega intacto à interface.
+        let denied = request(Some(&screen), true, Some(AudioScope::System)).validate(&none);
+        assert_eq!(denied.unwrap_err(), "sem suporte neste SO");
+        // Áudio do sistema sozinho dispensa a fonte de vídeo; vídeo, não.
+        assert!(
+            request(None, false, Some(AudioScope::System))
+                .validate(&full)
+                .is_ok()
+        );
+        assert!(request(None, true, None).validate(&full).is_err());
+        assert!(
+            request(None, true, Some(AudioScope::System))
+                .validate(&full)
+                .is_err()
+        );
+        // Áudio de aplicativo exige uma janela: monitor e "nenhuma fonte" são recusados.
+        for source in [None, Some(&screen)] {
+            assert!(
+                request(source, false, Some(AudioScope::Application))
+                    .validate(&full)
+                    .is_err()
+            );
         }
     }
 

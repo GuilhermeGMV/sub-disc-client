@@ -82,7 +82,7 @@ def main():
                     if x11.XFetchName(display, children[i], c.byref(name)) and name:
                         title = c.string_at(name).decode(errors="replace")
                         x11.XFree(name)
-                        if title == "Subdisc":
+                        if title == "kledisc":
                             return children[i]
             finally:
                 if children:
@@ -132,8 +132,12 @@ def main():
                 else:
                     click(185, 700)  # dispositivos: deve listar somente os simulados
                     subprocess.run(["import", "-window", str(window), str(artifacts / "devices.png")], env=env, check=True)
-                    click(150, 670)  # seletor de compartilhamento
+                    click(40, 670)  # seletor de compartilhamento
                     subprocess.run(["import", "-window", str(window), str(artifacts / "sources.png")], env=env, check=True)
+                    click(447, 281)  # Janela específica
+                    click(360, 342)  # primeira janela simulada
+                    click(322, 453)  # Enviar áudio: escopo e aviso de privacidade
+                    subprocess.run(["import", "-window", str(window), str(artifacts / "share-audio.png")], env=env, check=True)
                     escape = x11.XKeysymToKeycode(display, 0xFF1B)
                     xtest.XTestFakeKeyEvent(display, escape, 1, 0)
                     xtest.XTestFakeKeyEvent(display, escape, 0, 0)

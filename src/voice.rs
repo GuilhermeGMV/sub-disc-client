@@ -10,7 +10,7 @@ use crate::bridge::{
 use crate::camera::CameraShare;
 use crate::capture::ShareRequest;
 use crate::model::MediaEvent;
-use crate::screen::ScreenShare;
+use crate::screen::{ScreenShare, ShareChange};
 use crate::ws::PresenceOut;
 use futures_util::StreamExt;
 use livekit::PlatformAudio;
@@ -119,7 +119,7 @@ async fn run(setup: VoiceSetup, mut rx: mpsc::UnboundedReceiver<VoiceCmd>) {
         tokio::select! {
             _ = tick.tick() => {
                 session.apply_audio();
-                if !session.screen.as_ref().is_some_and(|share| share.finished()) && !session.camera.as_ref().is_some_and(|share| share.finished()) {
+                if !session.screen.as_ref().is_some_and(|share| share.needs_attention()) && !session.camera.as_ref().is_some_and(|share| share.finished()) {
                     continue;
                 }
             }
@@ -160,6 +160,20 @@ async fn run(setup: VoiceSetup, mut rx: mpsc::UnboundedReceiver<VoiceCmd>) {
 
 type ScreenResult = Result<ScreenShare, String>;
 
+/// Voz: fonte do ADM com o processamento escolhido nas configurações. O áudio
+/// do compartilhamento é outra track (`screen::audio_options`).
+fn mic_options() -> TrackPublishOptions {
+    TrackPublishOptions {
+        source: TrackSource::Microphone,
+        audio_encoding: Some(AudioEncoding {
+            max_bitrate: 96_000,
+        }),
+        dtx: true,
+        red: true,
+        ..Default::default()
+    }
+}
+
 async fn connect(
     setup: VoiceSetup,
     screen_tx: mpsc::UnboundedSender<(u64, ScreenResult)>,
@@ -182,18 +196,9 @@ async fn connect(
         }
     };
     let mic = LocalAudioTrack::create_audio_track("microphone", setup.audio.rtc_source());
-    let options = TrackPublishOptions {
-        source: TrackSource::Microphone,
-        audio_encoding: Some(AudioEncoding {
-            max_bitrate: 96_000,
-        }),
-        dtx: true,
-        red: true,
-        ..Default::default()
-    };
     if let Err(e) = room
         .local_participant()
-        .publish_track(LocalTrack::Audio(mic.clone()), options)
+        .publish_track(LocalTrack::Audio(mic.clone()), mic_options())
         .await
     {
         log::warn!("falha ao publicar o microfone: {e}");
@@ -335,7 +340,12 @@ impl Session {
                 if self.screen_pending {
                     return;
                 }
-                if let Err(error) = request.validate(false) {
+                // Sem áudio a validação não depende do SO: pedidos impossíveis são
+                // recusados antes de parar a transmissão atual. Com áudio, `start`
+                // valida contra a disponibilidade verificada no momento do início.
+                if request.audio.is_none()
+                    && let Err(error) = request.validate(&Err(String::new()))
+                {
                     self.setup.ui.error(error);
                     return;
                 }
@@ -346,7 +356,18 @@ impl Session {
                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                 self.screen_cancel = Some(cancel_tx);
                 self.screen_jobs.spawn(async move {
-                    let result = ScreenShare::start(local, request, cancel_rx).await;
+                    // Revalida no momento do início: a saída pode ter sido removida
+                    // desde que o modal abriu.
+                    let audio = if request.audio.is_some() {
+                        tokio::task::spawn_blocking(crate::system_audio::availability)
+                            .await
+                            .unwrap_or_else(
+                                |_| Err("Falha ao verificar o áudio do sistema.".into()),
+                            )
+                    } else {
+                        Err(String::new())
+                    };
+                    let result = ScreenShare::start(local, request, audio, cancel_rx).await;
                     let _ = tx.send((generation, result));
                 });
             }
@@ -367,7 +388,13 @@ impl Session {
                 });
             }
             VoiceCmd::StopCamera => self.stop_camera().await,
-            VoiceCmd::StopScreen => self.stop_screen().await,
+            VoiceCmd::StopScreen => {
+                let sharing = self.screen.is_some();
+                self.stop_screen().await;
+                if sharing {
+                    self.setup.ui.error("Compartilhamento encerrado.");
+                }
+            }
             VoiceCmd::Leave => {}
         }
     }
@@ -401,10 +428,10 @@ impl Session {
         let mut active = HashMap::new();
         for participant in self.room.remote_participants().into_values() {
             for publication in participant.track_publications().into_values() {
-                if !publication.is_muted() {
-                    if let Some(RemoteTrack::Video(video)) = publication.track() {
-                        active.insert(video.sid().to_string(), (video, participant.clone()));
-                    }
+                if !publication.is_muted()
+                    && let Some(RemoteTrack::Video(video)) = publication.track()
+                {
+                    active.insert(video.sid().to_string(), (video, participant.clone()));
                 }
             }
         }
@@ -423,12 +450,15 @@ impl Session {
     /// Atualiza a interface e o estado de mídia enviado ao servidor.
     fn publish(&mut self) {
         self.sync_remote_videos();
-        // A captura pode ter terminado sozinha (portal cancelado, janela fechada).
-        if self.screen.as_ref().is_some_and(|share| share.finished()) {
-            self.screen.take();
-            self.setup
-                .ui
-                .error("A captura foi encerrada ou a fonte ficou indisponível.");
+        // A captura pode ter terminado sozinha (portal cancelado, janela fechada,
+        // saída de áudio desconectada). Partes encerradas despublicam no Drop.
+        match self.screen.as_mut().and_then(ScreenShare::poll) {
+            Some(ShareChange::Ended(message)) => {
+                self.screen.take();
+                self.setup.ui.error(message);
+            }
+            Some(ShareChange::AudioStopped(message)) => self.setup.ui.error(message),
+            None => {}
         }
         if self.camera.as_ref().is_some_and(|camera| camera.finished()) {
             self.camera.take();
@@ -437,6 +467,14 @@ impl Session {
                 .error("A câmera foi desconectada ou parou de enviar vídeo.");
         }
         let local = self.room.local_participant();
+        // Estado real: a parte existe e a track está publicada na sala (uma
+        // republicação que falhou após reconexão aparece como desativada).
+        let publications = local.track_publications();
+        let published = |source| publications.values().any(|p| p.source() == source);
+        let share_video = self.screen.as_ref().is_some_and(ScreenShare::has_video)
+            && published(TrackSource::Screenshare);
+        let share_audio = self.screen.as_ref().is_some_and(ScreenShare::has_audio)
+            && published(TrackSource::ScreenshareAudio);
         let mut participants = vec![ParticipantView {
             identity: local.identity().to_string(),
             name: local.name(),
@@ -444,7 +482,7 @@ impl Session {
             speaking: local.is_speaking(),
             muted: self.muted,
             volume: Default::default(),
-            screen_audio: false,
+            screen_audio: share_audio,
         }];
         for p in self.room.remote_participants().into_values() {
             let identity = p.identity().to_string();
@@ -491,8 +529,8 @@ impl Session {
             screen_pending: self.screen_pending,
             camera: self.camera.is_some(),
             camera_pending: self.camera_pending,
-            share_video: self.screen.is_some(),
-            share_audio: false,
+            share_video,
+            share_audio,
             participants,
             tiles,
         })));
@@ -593,6 +631,33 @@ fn prune_remote_videos(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microphone_and_screen_audio_are_independent_tracks() {
+        let (mic, screen, video) = (
+            mic_options(),
+            crate::screen::audio_options(),
+            crate::screen::video_options(),
+        );
+        assert_eq!(mic.source, TrackSource::Microphone);
+        assert_eq!(screen.source, TrackSource::ScreenshareAudio);
+        assert_eq!(video.source, TrackSource::Screenshare);
+        // Vídeo e áudio da tela no mesmo stream (lip-sync); o microfone fora dele.
+        assert_eq!(screen.stream, video.stream);
+        assert_ne!(mic.stream, screen.stream);
+        // Música não passa pelo DTX da voz.
+        assert!(mic.dtx && !screen.dtx);
+        // Os volumes recebidos também são separados por fonte.
+        let mut prefs = crate::audio::ParticipantVolume::default();
+        prefs.set(
+            AudioKind::ScreenShare,
+            Volume {
+                gain: 0.2,
+                muted: false,
+            },
+        );
+        assert_eq!(prefs.microphone.gain, 1.0);
+    }
 
     #[tokio::test]
     async fn disabled_remote_camera_removes_tile_and_frame_but_keeps_screen() {

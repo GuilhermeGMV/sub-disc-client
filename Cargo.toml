@@ -21,6 +21,23 @@ tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "
 [target.'cfg(target_os = "linux")'.dependencies]
 livekit = { version = "=0.9.3", features = ["glib-main-loop"] }
 
+# Áudio do compartilhamento: WASAPI process loopback. Mesmas versões que o
+# eframe/winit já trazem no Cargo.lock; `windows-core` é exigido pelo #[implement].
+[target.'cfg(windows)'.dependencies]
+windows = { version = "=0.62.2", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Security",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "=0.62.2"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

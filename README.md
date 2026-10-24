@@ -164,7 +164,11 @@ A sessão e preferências são salvas em `%APPDATA%\subdisc-client\config.json` 
   em **Ligar câmera → Câmera** e acompanhar a prévia local. A captura nativa usa
   Media Foundation no Windows e V4L2 no Linux; sair da chamada desliga a câmera.
 - Compartilhar a tela: no Wayland abre o seletor do sistema (portal + PipeWire);
-  no X11 e no Windows oferece seleção explícita de monitores e janelas. Envio de áudio da tela e captura de abas ainda não são suportados.
+  no X11 e no Windows oferece seleção explícita de monitores e janelas.
+- Enviar o som do computador junto com a tela, ou sozinho, no **Windows 10
+  versão 2004 ou mais recente** (WASAPI process loopback): todo o som exceto o
+  próprio kledisc, ou só o aplicativo da janela escolhida. No Linux o envio de
+  áudio continua desabilitado; captura de abas não é suportada.
 
 ## Uso
 
@@ -185,7 +189,9 @@ Logs: `RUST_LOG=subdisc_client=debug target/release/subdisc-client`.
 | `src/api.rs` | HTTP `/api` (cookie `subdisc_session` e `Origin`) |
 | `src/ws.rs` | WebSocket de eventos com reconexão |
 | `src/voice.rs` | Sala LiveKit, microfone, recepção de vídeo |
-| `src/screen.rs` | Captura e publicação da fonte confirmada, cancelamento e limpeza |
+| `src/screen.rs` | Captura e publicação de vídeo/áudio da tela, cancelamento e limpeza |
+| `src/system_audio.rs` | Áudio do compartilhamento: conversão, fila limitada e ritmo de 10 ms |
+| `src/system_audio/wasapi.rs` | Captura WASAPI process loopback (somente Windows) |
 | `src/audio.rs` | Preferências, limites, rampas e registro de playout por track |
 | `src/capture.rs` | Enumeração, validação de fontes/modos e worker RAII |
 | `src/ui_capture.rs` | Modal compartilhado de seleção e envio |
@@ -225,7 +231,9 @@ garantia de ausência de clipping nessa condição.
 1. Entre em uma chamada e clique em **Tela**.
 2. Escolha **Tela inteira** ou **Janela específica**, atualize as fontes se
    necessário e selecione uma entrada. A enumeração não captura frames.
-3. Habilite **Enviar vídeo** e confirme **Iniciar compartilhamento**.
+3. Marque **Enviar vídeo**, **Enviar áudio** ou ambos e confirme **Iniciar
+   compartilhamento**. Para áudio sozinho com o som do sistema, a seleção de
+   tela é dispensada.
 4. Use **Parar** para encerrar ou **Trocar fonte** para selecionar novamente,
    mantendo a chamada. Durante a autorização, **Cancelar captura** interrompe
    a solicitação.
@@ -236,13 +244,41 @@ frame autorizado. Fechar a janela selecionada, desconectar o monitor ou uma
 falha permanente encerra a transmissão. Não há prévias que capturem conteúdo
 antes da confirmação.
 
-**Enviar áudio** está explicitamente indisponível no backend real em Windows,
-X11 e Wayland. Este capturador fornece somente frames; não foram implementados
-WASAPI loopback, seleção de monitor de áudio PulseAudio ou captura PipeWire de
-áudio. Só vídeo é funcional; áudio sozinho e vídeo + áudio são rejeitados antes
-de criar captura/tracks. Desabilitar ambos impede o início. O microfone da
-chamada continua separado. Receber `ScreenshareAudio` de outro cliente é
-suportado com ganho independente.
+### Áudio do compartilhamento
+
+**Windows 10 2004 (build 19041) ou mais recente.** Ao marcar **Enviar áudio**
+escolha a origem:
+
+- **Todo o som do computador (exceto o kledisc)** — tudo o que os outros
+  aplicativos tocam, *inclusive notificações do Windows e sons de outros
+  programas*. O próprio kledisc é excluído, então as vozes da chamada não são
+  reenviadas para a sala.
+- **Somente o aplicativo da janela selecionada** — disponível com **Janela
+  específica**: captura o processo dono da janela e seus subprocessos (por
+  exemplo, o processo de áudio do Chrome/Firefox). Capturar uma janela **não**
+  limita o áudio a ela automaticamente; essa opção precisa ser escolhida. Apps
+  da Microsoft Store hospedados por outro processo podem não ser capturados.
+
+O áudio é publicado como uma track separada `ScreenshareAudio` (captura
+estéreo 48 kHz, Opus a 128 kbps, sem DTX e sem cancelamento de eco, ganho automático ou
+supressão de ruído), no mesmo `stream` da track `Screenshare` para que o
+receptor sincronize imagem e som. O microfone continua outra track
+(`Microphone`), com mudo e volume próprios. A captura só começa depois de
+**Iniciar compartilhamento** e termina em **Parar**, ao sair da chamada ou ao
+fechar o aplicativo.
+
+Se a saída padrão mudar, o loopback segue a nova saída. Se não houver nenhuma
+saída, a janela do aplicativo fechar ou a captura falhar, o áudio é encerrado,
+a track é retirada e a interface avisa; o vídeo continua. Se o vídeo terminar,
+o áudio termina junto. Falhar ao iniciar ou publicar qualquer uma das partes
+cancela as duas: nada fica transmitindo sem aviso.
+
+**Linux (X11/Wayland):** **Enviar áudio** fica desabilitado com o motivo no
+modal. Captura de monitor PulseAudio/PipeWire ainda não foi implementada. Em
+versões do Windows anteriores ao build 19041, ou sem dispositivo de saída, o
+modal também mostra o motivo e só o vídeo pode ser enviado. Receber
+`ScreenshareAudio` de outros clientes funciona em todos os sistemas, com ganho
+independente.
 
 **Abas de navegador estão indisponíveis.** Uma janela de Chrome/Firefox continua
 sendo uma janela inteira. Não há helper no navegador, transporte local de mídia
@@ -272,7 +308,8 @@ e uma câmera sintética. Navegue, envie mensagens com Enter, entre/saia das
 salas, ajuste ganhos/mutes, amplie vídeos, abra dispositivos e compartilhe fontes
 simuladas. O banner permite simular conexão, desconexão, reconexão e erro.
 
-No demo, vídeo + áudio, somente vídeo e somente áudio são estados simulados;
+No demo, vídeo + áudio (sistema ou aplicativo), somente vídeo e somente áudio
+são estados simulados;
 nenhum deles abre dispositivos ou publica mídia. Os frames são gerados em
 memória a 5 fps e usam o mesmo `Frames` do backend real. Nenhuma configuração ou
 credencial de login é carregada/salva; mensagens e preferências fictícias são
@@ -323,6 +360,8 @@ Para validação manual de mídia, use dois clientes e um servidor: envie tons d
 nível conhecido por microfone e `ScreenshareAudio`; compare cada slider/mute,
 reconecte, troque a saída, remova a janela/monitor e encerre a chamada durante o
 portal. Confirme que nenhuma fonte padrão é capturada quando a seleção falha.
+O roteiro do áudio de compartilhamento no Windows está em
+[docs/media.md](docs/media.md#procedimento-de-teste-no-windows).
 
 Linux requer sessão gráfica para abrir a janela; Wayland requer portal e
 PipeWire para compartilhar a tela. A webcam requer acesso ao dispositivo V4L2

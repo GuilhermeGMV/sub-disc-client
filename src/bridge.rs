@@ -120,6 +120,8 @@ pub enum Event {
     Sources {
         request: u64,
         result: Result<Vec<crate::capture::CaptureSourceInfo>, String>,
+        /// Se o envio de áudio pode ser habilitado, e por que não.
+        audio: crate::capture::AudioAvailability,
     },
     Probed {
         needs_setup: bool,

@@ -153,7 +153,11 @@ impl App {
         match event {
             Event::Cameras(result) => self.camera.receive(result),
             Event::AdminFinished(result) => self.admin.finish(result),
-            Event::Sources { request, result } => self.share.receive(request, result),
+            Event::Sources {
+                request,
+                result,
+                audio,
+            } => self.share.receive(request, result, audio),
             Event::Probed { needs_setup } => {
                 self.form.needs_setup = needs_setup;
                 if needs_setup {
@@ -1196,13 +1200,12 @@ impl eframe::App for App {
                 ) {
                     self.send(command);
                 }
-                if let Some(voice) = &self.voice {
-                    if let Some(command) =
+                if let Some(voice) = &self.voice
+                    && let Some(command) =
                         self.camera
                             .show(ui.ctx(), voice.camera, voice.camera_pending)
-                    {
-                        self.send(command);
-                    }
+                {
+                    self.send(command);
                 }
                 if self.audio.open {
                     self.audio_window(&ui.ctx().clone());
@@ -1399,6 +1402,7 @@ mod tests {
         app.handle(Event::Sources {
             request,
             result: Ok(vec![]),
+            audio: Err("sem suporte".into()),
         });
         let _ = paint(&ctx, |_ui| {
             app.share.show(&ctx, true);
