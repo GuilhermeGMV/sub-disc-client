@@ -353,6 +353,8 @@ impl Demo {
                 }
                 events.push(Event::Connection(status == VoiceStatus::Connected));
             }
+            // A interface já guarda o valor; o demo não grava configuração.
+            Command::SetBrightness { .. } => {}
             Command::DemoError => events.push(Event::Error(
                 "SIMULAÇÃO: conexão interrompida; use Reconectar para testar a recuperação.".into(),
             )),

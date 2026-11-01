@@ -133,6 +133,13 @@ impl Backend {
         ));
         self.api = Some(api);
         self.ui.send(Event::LoggedIn { user });
+        let brightness = self
+            .config
+            .brightness
+            .get(&self.config.server)
+            .cloned()
+            .unwrap_or_default();
+        self.ui.send(Event::Brightness(brightness));
     }
 
     async fn end_session(&mut self, error: Option<String>) {
@@ -248,6 +255,21 @@ impl Backend {
                     .set(kind, volume);
                 self.volume_dirty = Some(Instant::now());
                 self.voice_cmd(VoiceCmd::SetVolume { user, kind, volume });
+            }
+            Command::SetBrightness { user, value } => {
+                let user = user_of(&user).to_owned();
+                let value = crate::config::clamp_brightness(value);
+                let saved = self
+                    .config
+                    .brightness
+                    .entry(self.config.server.clone())
+                    .or_default();
+                if value == 1.0 {
+                    saved.remove(&user);
+                } else {
+                    saved.insert(user, value);
+                }
+                self.volume_dirty = Some(Instant::now());
             }
             Command::ListSources { request } => {
                 let ui = self.ui.clone();
