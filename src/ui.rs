@@ -60,7 +60,10 @@ pub struct App {
     cmd: UnboundedSender<Command>,
     events: mpsc::Receiver<Event>,
     frames: Frames,
-    textures: HashMap<String, (TextureHandle, u64)>,
+    /// Textura, `seq` do frame enviado e brilho aplicado a ele.
+    textures: HashMap<String, (TextureHandle, u64, f32)>,
+    /// Brilho local do compartilhamento de cada usuário (ID → fator).
+    brightness: HashMap<String, f32>,
     screen: Screen,
     form: LoginForm,
     error: Option<(String, Instant)>,
@@ -104,6 +107,7 @@ impl App {
             events,
             frames,
             textures: HashMap::new(),
+            brightness: HashMap::new(),
             screen: Screen::Loading,
             form: LoginForm {
                 server: config.server,
@@ -185,6 +189,7 @@ impl App {
                 self.hidden_videos.clear();
                 self.expanded = None;
                 self.textures.clear();
+                self.brightness.clear();
                 self.screen = Screen::Login;
                 if let Some(e) = error {
                     self.show_error(e);
@@ -197,6 +202,12 @@ impl App {
                 }
             }
             Event::Connection(connected) => self.connected = connected,
+            Event::Brightness(saved) => {
+                self.brightness = saved
+                    .into_iter()
+                    .map(|(user, value)| (user, crate::config::clamp_brightness(value)))
+                    .collect();
+            }
             Event::Snapshot(snapshot) => {
                 if let Some(current) = &mut self.user
                     && let Some(updated) = snapshot.users.iter().find(|u| u.id == current.id)
@@ -776,7 +787,10 @@ impl App {
                     if self.video_hidden(tile) {
                         return;
                     }
-                    self.tile_volume(ui, &voice, &tile.user, tile.screen);
+                    ui.horizontal_wrapped(|ui| {
+                        self.tile_brightness(ui, tile);
+                        self.tile_volume(ui, &voice, &tile.user, tile.screen);
+                    });
                     let size = ui.available_size();
                     self.video(ui, &key, size);
                     return;
@@ -877,6 +891,7 @@ impl App {
                                         {
                                             self.set_video_hidden(tile, true);
                                         }
+                                        self.tile_brightness(ui, tile);
                                         self.tile_volume(ui, &voice, &tile.user, tile.screen);
                                     });
                                 }
@@ -983,6 +998,59 @@ impl App {
         }
     }
 
+    fn screen_brightness(&self, tile: &crate::bridge::TileView) -> f32 {
+        if tile.screen && self.remote_video(tile) {
+            self.brightness.get(&tile.user).copied().unwrap_or(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Brilho local do compartilhamento recebido; salvo por quem compartilha.
+    fn tile_brightness(&mut self, ui: &mut egui::Ui, tile: &crate::bridge::TileView) {
+        if !tile.screen || !self.remote_video(tile) {
+            return;
+        }
+        let current = self.screen_brightness(tile);
+        let mut percent = current * 100.0;
+        let mut changed = false;
+        ui.push_id(("brightness", &tile.user), |ui| {
+            ui.vertical(|ui| {
+                ui.label(RichText::new("☀ Brilho da tela").small())
+                    .on_hover_text("Ajusta só para você e fica salvo para este usuário.");
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut percent,
+                                crate::config::BRIGHTNESS_MIN * 100.0
+                                    ..=crate::config::BRIGHTNESS_MAX * 100.0,
+                            )
+                            .suffix("%")
+                            .step_by(1.0),
+                        )
+                        .changed();
+                    if current != 1.0 && ui.small_button("Restaurar").clicked() {
+                        percent = 100.0;
+                        changed = true;
+                    }
+                });
+            });
+        });
+        if changed {
+            let value = crate::config::clamp_brightness(percent / 100.0);
+            if value == 1.0 {
+                self.brightness.remove(&tile.user);
+            } else {
+                self.brightness.insert(tile.user.clone(), value);
+            }
+            self.send(Command::SetBrightness {
+                user: tile.user.clone(),
+                value,
+            });
+        }
+    }
+
     fn set_fullscreen(&mut self, ctx: &egui::Context, full: bool) {
         if self.fullscreen != full {
             self.fullscreen = full;
@@ -996,7 +1064,7 @@ impl App {
         ui.painter()
             .rect_filled(rect, 8.0, Color32::from_rgb(8, 14, 16));
         match self.textures.get(key) {
-            Some((texture, _)) => {
+            Some((texture, _, brightness)) => {
                 let [w, h] = texture.size();
                 let scale = (rect.width() / w as f32).min(rect.height() / h as f32);
                 let fitted = egui::Rect::from_center_size(
@@ -1004,7 +1072,10 @@ impl App {
                     Vec2::new(w as f32, h as f32) * scale,
                 );
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-                ui.painter().image(texture.id(), fitted, uv, Color32::WHITE);
+                // Escurecer é só a cor de tinta (GPU); clarear já veio nos pixels.
+                let tint = (brightness.min(1.0) * 255.0).round() as u8;
+                ui.painter()
+                    .image(texture.id(), fitted, uv, Color32::from_gray(tint));
             }
             None => {
                 ui.painter().text(
@@ -1035,20 +1106,34 @@ impl App {
             let Some(frame) = frames.get(&tile.key) else {
                 continue;
             };
-            let current = self.textures.get(&tile.key).map(|(_, seq)| *seq);
-            if current == Some(frame.seq) {
+            let brightness = self.screen_brightness(tile);
+            let gain = brightness.max(1.0);
+            // Escurecer não exige reenviar a textura: só a tinta muda.
+            if let Some((_, seq, applied)) = self.textures.get_mut(&tile.key)
+                && *seq == frame.seq
+                && applied.max(1.0) == gain
+            {
+                *applied = brightness;
                 continue;
             }
-            let image =
-                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.data);
+            let image = if gain > 1.0 {
+                egui::ColorImage::from_rgba_unmultiplied(
+                    [frame.width, frame.height],
+                    &brighten(&frame.data, gain),
+                )
+            } else {
+                egui::ColorImage::from_rgba_unmultiplied([frame.width, frame.height], &frame.data)
+            };
             match self.textures.get_mut(&tile.key) {
-                Some((texture, seq)) => {
+                Some((texture, seq, applied)) => {
                     texture.set(image, TextureOptions::LINEAR);
                     *seq = frame.seq;
+                    *applied = brightness;
                 }
                 None => {
                     let texture = ctx.load_texture(&tile.key, image, TextureOptions::LINEAR);
-                    self.textures.insert(tile.key.clone(), (texture, frame.seq));
+                    self.textures
+                        .insert(tile.key.clone(), (texture, frame.seq, brightness));
                 }
             }
         }
@@ -1253,6 +1338,18 @@ fn format_time(timestamp: i64) -> String {
     }
 }
 
+/// Multiplica R, G e B (não o alfa) por `gain` > 1, com saturação em 255.
+fn brighten(rgba: &[u8], gain: f32) -> Vec<u8> {
+    let lut: [u8; 256] = std::array::from_fn(|v| (v as f32 * gain).round().min(255.0) as u8);
+    let mut out = rgba.to_vec();
+    for pixel in out.chunks_exact_mut(4) {
+        pixel[0] = lut[pixel[0] as usize];
+        pixel[1] = lut[pixel[1] as usize];
+        pixel[2] = lut[pixel[2] as usize];
+    }
+    out
+}
+
 /// Ganho contínuo e mute independentes; mute preserva o valor para restaurar.
 fn volume_control(
     ui: &mut egui::Ui,
@@ -1301,6 +1398,12 @@ fn volume_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn brighten_scales_color_saturates_and_keeps_alpha() {
+        let out = brighten(&[10, 100, 200, 128, 0, 255, 1, 7], 1.5);
+        assert_eq!(out, vec![15, 150, 255, 128, 0, 255, 2, 7]);
+    }
 
     #[test]
     fn hiding_video_preserves_audio_and_other_sources_and_resets_on_leave() {

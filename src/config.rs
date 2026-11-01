@@ -13,6 +13,21 @@ pub struct Config {
     /// Origem normalizada do servidor → ID estável de usuário → ganhos locais.
     #[serde(default)]
     pub volumes: std::collections::HashMap<String, crate::audio::Volumes>,
+    /// Origem do servidor → ID de quem compartilha → brilho local da tela.
+    #[serde(default)]
+    pub brightness: std::collections::HashMap<String, std::collections::HashMap<String, f32>>,
+}
+
+/// Faixa do brilho local aplicado ao compartilhamento de tela recebido.
+pub const BRIGHTNESS_MIN: f32 = 0.3;
+pub const BRIGHTNESS_MAX: f32 = 1.5;
+
+pub fn clamp_brightness(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(BRIGHTNESS_MIN, BRIGHTNESS_MAX)
+    } else {
+        1.0
+    }
 }
 
 pub fn dir() -> Option<PathBuf> {
@@ -68,6 +83,7 @@ mod tests {
             serde_json::from_str(r#"{"server":"https://a","username":"ana","session":"example"}"#)
                 .unwrap();
         assert!(config.volumes.is_empty());
+        assert!(config.brightness.is_empty());
         config
             .volumes
             .entry("https://a".into())
@@ -94,5 +110,23 @@ mod tests {
         assert_eq!(restored.volumes["https://a"]["u"].screen_share.gain, 0.35);
         assert!(restored.volumes["https://a"]["u"].screen_share.muted);
         assert_eq!(restored.volumes["https://b"]["u"].screen_share.gain, 1.0);
+    }
+
+    #[test]
+    fn brightness_is_clamped_and_saved_per_server_and_user() {
+        assert_eq!(clamp_brightness(0.0), BRIGHTNESS_MIN);
+        assert_eq!(clamp_brightness(9.0), BRIGHTNESS_MAX);
+        assert_eq!(clamp_brightness(f32::NAN), 1.0);
+        assert_eq!(clamp_brightness(0.7), 0.7);
+        let mut config = Config::default();
+        config
+            .brightness
+            .entry("https://a".into())
+            .or_default()
+            .insert("u".into(), 0.6);
+        let restored: Config =
+            serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(restored.brightness["https://a"]["u"], 0.6);
+        assert!(!restored.brightness.contains_key("https://b"));
     }
 }

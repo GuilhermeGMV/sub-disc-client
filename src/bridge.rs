@@ -45,6 +45,11 @@ pub enum Command {
         kind: crate::audio::AudioKind,
         volume: crate::audio::Volume,
     },
+    /// Brilho local do compartilhamento de tela de um usuário (salvo por servidor).
+    SetBrightness {
+        user: String,
+        value: f32,
+    },
     ListSources {
         request: u64,
     },
@@ -138,6 +143,8 @@ pub enum Event {
         error: String,
     },
     Connection(bool),
+    /// Brilhos salvos para o servidor atual (usuário → brilho).
+    Brightness(HashMap<String, f32>),
     Snapshot(Snapshot),
     Presence {
         online: Vec<String>,

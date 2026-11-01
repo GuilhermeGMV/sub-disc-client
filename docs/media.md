@@ -49,6 +49,28 @@ de implementá-lo, seria necessário verificar os grants de `ScreenshareAudio` d
 token emitido pelo servidor implantado. Não há proposta de endpoint de token
 público nem de redução dos controles atuais de autenticação/publicação.
 
+## Brilho do compartilhamento recebido
+
+Em alguns casos a tela chega clara/lavada demais (brilho ou gamma alto). A causa
+provável é o **HDR do Windows** no monitor de quem compartilha: o capturador do
+libwebrtc (WGC/DXGI) pede frames BGRA de 8 bits e o Windows converte a área de
+trabalho HDR (scRGB) para SDR sem o mapeamento de tons adequado, então o vídeo
+já sai claro do remetente. O mesmo acontece em outros apps baseados em WebRTC.
+Corrigir na origem exigiria capturar em `R16G16B16A16_FLOAT` e fazer o tone
+mapping, o que não é exposto pelo libwebrtc pré-compilado usado aqui. Paliativo
+para quem compartilha: desligar o HDR (Win+Alt+B) ou reduzir o "brilho do
+conteúdo SDR" nas configurações de vídeo do Windows.
+
+Para quem assiste há um controle **Brilho da tela** (30–150 %) em cada
+compartilhamento remoto, só local:
+
+- cliente nativo: abaixo de 100 % é uma tinta na GPU (sem custo); acima, os
+  pixels RGB são multiplicados (LUT) antes de enviar a textura. Salvo em
+  `config.json` (`brightness`: servidor → ID do usuário → fator), por quem
+  compartilha, como os volumes;
+- navegador: `filter: brightness()` no vídeo, salvo em `localStorage`
+  (`subdisc:screen-brightness`) pelo ID do usuário que compartilha.
+
 ## Áudio de compartilhamento
 
 ### Suporte por sistema
